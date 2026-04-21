@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cyphera Open PKI Server</title>
+<style>
+:root {
+  --bg: #0f1117;
+  --surface: #1a1d27;
+  --surface2: #242836;
+  --border: #2e3344;
+  --text: #e4e5e9;
+  --text2: #8b8fa3;
+  --accent: #6366f1;
+  --accent2: #818cf8;
+  --green: #22c55e;
+  --yellow: #eab308;
+  --red: #ef4444;
+  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; line-height: 1.5; }
+a { color: var(--accent2); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* Layout */
+.shell { display: flex; min-height: 100vh; }
+.sidebar { width: 220px; background: var(--surface); border-right: 1px solid var(--border); padding: 20px 0; flex-shrink: 0; }
+.sidebar .logo { padding: 0 20px 20px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+.sidebar .logo h1 { font-size: 15px; font-weight: 600; color: var(--text); }
+.sidebar .logo span { font-size: 11px; color: var(--text2); }
+.sidebar nav a { display: block; padding: 8px 20px; color: var(--text2); font-size: 13px; transition: all 0.15s; }
+.sidebar nav a:hover, .sidebar nav a.active { color: var(--text); background: var(--surface2); text-decoration: none; }
+.sidebar nav a.active { border-left: 2px solid var(--accent); }
+.main { flex: 1; padding: 24px 32px; overflow-x: auto; }
+.main h2 { font-size: 20px; font-weight: 600; margin-bottom: 20px; }
+
+/* Cards */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.stat { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+.stat .label { font-size: 12px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; }
+.stat .value { font-size: 28px; font-weight: 700; margin-top: 4px; font-family: var(--mono); }
+.stat .value.green { color: var(--green); }
+.stat .value.yellow { color: var(--yellow); }
+.stat .value.red { color: var(--red); }
+
+/* Table */
+table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+thead { background: var(--surface2); }
+th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text2); text-align: left; padding: 10px 14px; font-weight: 600; }
+td { padding: 10px 14px; border-top: 1px solid var(--border); font-size: 13px; }
+tr:hover td { background: var(--surface2); }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+.badge-active { background: rgba(34,197,94,0.15); color: var(--green); }
+.badge-revoked { background: rgba(239,68,68,0.15); color: var(--red); }
+.badge-expired { background: rgba(234,179,8,0.15); color: var(--yellow); }
+.badge-root { background: rgba(99,102,241,0.15); color: var(--accent2); }
+.badge-intermediate { background: rgba(99,102,241,0.1); color: var(--accent); }
+.mono { font-family: var(--mono); font-size: 12px; color: var(--text2); }
+.truncate { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Buttons */
+.btn { display: inline-block; padding: 6px 14px; border-radius: 6px; font-size: 13px; font-weight: 500; border: none; cursor: pointer; transition: all 0.15s; }
+.btn-primary { background: var(--accent); color: white; }
+.btn-primary:hover { background: var(--accent2); }
+.btn-danger { background: var(--red); color: white; }
+.btn-danger:hover { opacity: 0.9; }
+.btn-sm { padding: 3px 10px; font-size: 12px; }
+
+/* Detail panel */
+.detail { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+.detail h3 { font-size: 16px; margin-bottom: 12px; }
+.detail-grid { display: grid; grid-template-columns: 140px 1fr; gap: 8px; }
+.detail-grid .label { color: var(--text2); font-size: 12px; }
+.detail-grid .value { font-size: 13px; word-break: break-all; }
+.pem-block { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 12px; font-family: var(--mono); font-size: 11px; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; margin-top: 12px; }
+.actions { display: flex; gap: 8px; margin-top: 16px; }
+
+/* Audit */
+.audit-entry { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.audit-entry:last-child { border-bottom: none; }
+.audit-action { font-weight: 600; }
+.audit-time { font-size: 12px; color: var(--text2); font-family: var(--mono); }
+.audit-details { font-size: 12px; color: var(--text2); margin-top: 2px; }
+
+/* Page sections */
+.section { margin-bottom: 24px; }
+.section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+
+/* Hide all pages by default */
+.page { display: none; }
+.page.active { display: block; }
+
+/* Loading */
+.loading { text-align: center; padding: 40px; color: var(--text2); }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="sidebar">
+    <div class="logo">
+      <h1>Open PKI</h1>
+      <span>Cyphera Labs</span>
+    </div>
+    <nav>
+      <a href="#" data-page="overview" class="active">Overview</a>
+      <a href="#" data-page="certificates">Certificates</a>
+      <a href="#" data-page="cas">Certificate Authorities</a>
+      <a href="#" data-page="audit">Audit Log</a>
+    </nav>
+  </div>
+  <div class="main">
+    <!-- Overview -->
+    <div id="page-overview" class="page active">
+      <h2>Overview</h2>
+      <div class="stats" id="stats"></div>
+      <div class="section">
+        <h3 style="margin-bottom:12px">Recent Activity</h3>
+        <div id="recent-audit"></div>
+      </div>
+    </div>
+
+    <!-- Certificates -->
+    <div id="page-certificates" class="page">
+      <div class="section-header">
+        <h2>Certificates</h2>
+      </div>
+      <table>
+        <thead><tr><th>Common Name</th><th>Profile</th><th>Serial</th><th>Status</th><th>Expires</th><th></th></tr></thead>
+        <tbody id="cert-table"></tbody>
+      </table>
+    </div>
+
+    <!-- Certificate Detail -->
+    <div id="page-cert-detail" class="page">
+      <h2>Certificate Detail</h2>
+      <div id="cert-detail-content"></div>
+    </div>
+
+    <!-- CAs -->
+    <div id="page-cas" class="page">
+      <h2>Certificate Authorities</h2>
+      <table>
+        <thead><tr><th>Name</th><th>Type</th><th>Subject</th><th>Serial</th><th>Status</th><th>Expires</th></tr></thead>
+        <tbody id="ca-table"></tbody>
+      </table>
+      <div style="margin-top:16px">
+        <a href="/v1/ca/bundle" class="btn btn-primary btn-sm" download="ca-bundle.pem">Download Trust Bundle</a>
+      </div>
+    </div>
+
+    <!-- Audit -->
+    <div id="page-audit" class="page">
+      <h2>Audit Log</h2>
+      <div id="audit-list"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '';
+
+async function api(path) {
+  const r = await fetch(API + path);
+  return r.json();
+}
+
+async function apiPost(path, body) {
+  const r = await fetch(API + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  return r.json();
+}
+
+// Navigation
+document.querySelectorAll('[data-page]').forEach(link => {
+  link.addEventListener('click', e => {
+    e.preventDefault();
+    showPage(link.dataset.page);
+  });
+});
+
+function showPage(name) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('[data-page]').forEach(a => a.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  document.querySelector('[data-page="' + name + '"]')?.classList.add('active');
+
+  if (name === 'overview') loadOverview();
+  if (name === 'certificates') loadCertificates();
+  if (name === 'cas') loadCAs();
+  if (name === 'audit') loadAudit();
+}
+
+// Overview
+async function loadOverview() {
+  const stats = await api('/v1/stats');
+  document.getElementById('stats').innerHTML = `
+    <div class="stat"><div class="label">Certificate Authorities</div><div class="value">${stats.TotalCAs}</div></div>
+    <div class="stat"><div class="label">Total Certificates</div><div class="value">${stats.TotalCerts}</div></div>
+    <div class="stat"><div class="label">Active</div><div class="value green">${stats.ActiveCerts}</div></div>
+    <div class="stat"><div class="label">Revoked</div><div class="value red">${stats.RevokedCerts}</div></div>
+    <div class="stat"><div class="label">Expiring (30d)</div><div class="value yellow">${stats.ExpiringSoon}</div></div>
+  `;
+
+  const events = await api('/v1/audit?limit=10');
+  document.getElementById('recent-audit').innerHTML = (events || []).map(e => `
+    <div class="audit-entry">
+      <span class="audit-action">${e.Action}</span>
+      <span class="mono" style="margin-left:8px">${e.TargetType}:${e.TargetID}</span>
+      <div class="audit-details">${e.Actor} — ${JSON.stringify(e.Details || {})}</div>
+    </div>
+  `).join('') || '<div class="loading">No events yet</div>';
+}
+
+// Certificates
+async function loadCertificates() {
+  const certs = await api('/v1/certificates');
+  document.getElementById('cert-table').innerHTML = (certs || []).map(c => `
+    <tr>
+      <td><a href="#" onclick="showCertDetail('${c.Serial}');return false">${c.CommonName}</a></td>
+      <td><span class="mono">${c.Profile}</span></td>
+      <td class="mono truncate">${c.Serial}</td>
+      <td><span class="badge badge-${c.Status}">${c.Status}</span></td>
+      <td class="mono">${c.NotAfter ? c.NotAfter.split('T')[0] : ''}</td>
+      <td>
+        ${c.Status === 'active' ? `<button class="btn btn-danger btn-sm" onclick="revokeCert('${c.Serial}')">Revoke</button>` : ''}
+      </td>
+    </tr>
+  `).join('') || '<tr><td colspan="6" class="loading">No certificates</td></tr>';
+}
+
+async function showCertDetail(serial) {
+  const cert = await api('/v1/certificates/' + serial);
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  const page = document.getElementById('page-cert-detail');
+  page.classList.add('active');
+
+  const sans = cert.SANs || [];
+  page.querySelector('#cert-detail-content').innerHTML = `
+    <div class="detail">
+      <h3>${cert.CommonName}</h3>
+      <div class="detail-grid">
+        <div class="label">Serial</div><div class="value mono">${cert.Serial}</div>
+        <div class="label">Subject</div><div class="value">${cert.Subject}</div>
+        <div class="label">Profile</div><div class="value">${cert.Profile}</div>
+        <div class="label">Status</div><div class="value"><span class="badge badge-${cert.Status}">${cert.Status}</span></div>
+        <div class="label">Not Before</div><div class="value mono">${cert.NotBefore || ''}</div>
+        <div class="label">Not After</div><div class="value mono">${cert.NotAfter || ''}</div>
+        <div class="label">SANs</div><div class="value">${sans.join(', ') || 'none'}</div>
+        <div class="label">Fingerprint</div><div class="value mono">${cert.PublicKeyFingerprint || ''}</div>
+        ${cert.RenewedFromSerial ? `<div class="label">Renewed From</div><div class="value mono">${cert.RenewedFromSerial}</div>` : ''}
+        ${cert.RevocationReason ? `<div class="label">Revocation Reason</div><div class="value">${cert.RevocationReason}</div>` : ''}
+      </div>
+      ${cert.CertificatePEM ? `<div class="pem-block">${cert.CertificatePEM}</div>` : ''}
+      <div class="actions">
+        ${cert.Status === 'active' ? `
+          <button class="btn btn-primary btn-sm" onclick="renewCert('${cert.Serial}')">Renew</button>
+          <button class="btn btn-danger btn-sm" onclick="revokeCert('${cert.Serial}')">Revoke</button>
+        ` : ''}
+        <button class="btn btn-sm" style="background:var(--surface2);color:var(--text)" onclick="showPage('certificates')">Back</button>
+      </div>
+    </div>
+  `;
+}
+
+async function revokeCert(serial) {
+  if (!confirm('Revoke certificate ' + serial + '?')) return;
+  await apiPost('/v1/certificates/' + serial + '/revoke', { reason: 'manual revocation' });
+  loadCertificates();
+}
+
+async function renewCert(serial) {
+  if (!confirm('Renew certificate ' + serial + '? The old cert will be revoked.')) return;
+  const result = await apiPost('/v1/certificates/renew', { serial });
+  if (result.serial) {
+    showCertDetail(result.serial);
+  }
+}
+
+// CAs
+async function loadCAs() {
+  const cas = await api('/v1/ca');
+  document.getElementById('ca-table').innerHTML = (cas || []).map(c => `
+    <tr>
+      <td>${c.Name}</td>
+      <td><span class="badge badge-${c.Type}">${c.Type}</span></td>
+      <td>${c.Subject}</td>
+      <td class="mono truncate">${c.Serial}</td>
+      <td><span class="badge badge-${c.Status}">${c.Status}</span></td>
+      <td class="mono">${c.NotAfter ? c.NotAfter.split('T')[0] : ''}</td>
+    </tr>
+  `).join('') || '<tr><td colspan="6" class="loading">No CAs</td></tr>';
+}
+
+// Audit
+async function loadAudit() {
+  const events = await api('/v1/audit?limit=100');
+  document.getElementById('audit-list').innerHTML = (events || []).map(e => `
+    <div class="audit-entry">
+      <div>
+        <span class="audit-action">${e.Action}</span>
+        <span class="mono" style="margin-left:8px">${e.TargetType}:${e.TargetID}</span>
+        <span class="audit-time" style="float:right">${e.Timestamp || ''}</span>
+      </div>
+      <div class="audit-details">${e.Actor} — ${JSON.stringify(e.Details || {})}</div>
+    </div>
+  `).join('') || '<div class="loading">No audit events</div>';
+}
+
+// Init
+loadOverview();
+</script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+FROM cgr.dev/chainguard/go:latest AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /open-pki ./cmd/open-pki/
+
+FROM cgr.dev/chainguard/wolfi-base:latest
+RUN mkdir -p /data && chown nonroot:nonroot /data
+COPY --from=build /open-pki /usr/local/bin/open-pki
+USER nonroot
+
+EXPOSE 8300
+VOLUME /data
+
+ENTRYPOINT ["open-pki"]
+CMD ["serve", "--addr", ":8300", "--db", "/data/open-pki.db"]

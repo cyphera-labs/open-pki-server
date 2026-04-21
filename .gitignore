@@ -1,0 +1,35 @@
+# Binaries
+open-pki
+open-pki-server
+*.exe
+
+# Go
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# PKI artifacts — never commit keys or certs
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.csr
+*.jks
+
+# Database
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test
+coverage.out
