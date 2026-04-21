@@ -1,6 +1,6 @@
 # Binaries
-open-pki
-open-pki-server
+/open-pki
+/open-pki-server
 *.exe
 
 # Go

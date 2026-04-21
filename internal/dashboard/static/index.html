@@ -127,6 +127,12 @@ tr:hover td { background: var(--surface2); }
       <div class="section-header">
         <h2>Certificates</h2>
       </div>
+      <div style="margin-bottom:12px;display:flex;gap:8px">
+        <button class="btn btn-sm" style="background:var(--surface2);color:var(--text)" onclick="filterCerts('')">All</button>
+        <button class="btn btn-sm" style="background:rgba(34,197,94,0.15);color:var(--green)" onclick="filterCerts('active')">Active</button>
+        <button class="btn btn-sm" style="background:rgba(239,68,68,0.15);color:var(--red)" onclick="filterCerts('revoked')">Revoked</button>
+        <button class="btn btn-sm" style="background:rgba(234,179,8,0.15);color:var(--yellow)" onclick="filterCerts('expired')">Expired</button>
+      </div>
       <table>
         <thead><tr><th>Common Name</th><th>Profile</th><th>Serial</th><th>Status</th><th>Expires</th><th></th></tr></thead>
         <tbody id="cert-table"></tbody>
@@ -143,7 +149,7 @@ tr:hover td { background: var(--surface2); }
     <div id="page-cas" class="page">
       <h2>Certificate Authorities</h2>
       <table>
-        <thead><tr><th>Name</th><th>Type</th><th>Subject</th><th>Serial</th><th>Status</th><th>Expires</th></tr></thead>
+        <thead><tr><th>Name</th><th>Type</th><th>Subject</th><th>Serial</th><th>Status</th><th>Expires</th><th>CRL</th></tr></thead>
         <tbody id="ca-table"></tbody>
       </table>
       <div style="margin-top:16px">
@@ -213,9 +219,17 @@ async function loadOverview() {
   `).join('') || '<div class="loading">No events yet</div>';
 }
 
+let currentStatusFilter = '';
+
+function filterCerts(status) {
+  currentStatusFilter = status;
+  loadCertificates();
+}
+
 // Certificates
 async function loadCertificates() {
-  const certs = await api('/v1/certificates');
+  const url = currentStatusFilter ? `/v1/certificates?status=${currentStatusFilter}` : '/v1/certificates';
+  const certs = await api(url);
   document.getElementById('cert-table').innerHTML = (certs || []).map(c => `
     <tr>
       <td><a href="#" onclick="showCertDetail('${c.Serial}');return false">${c.CommonName}</a></td>
@@ -250,7 +264,10 @@ async function showCertDetail(serial) {
         <div class="label">SANs</div><div class="value">${sans.join(', ') || 'none'}</div>
         <div class="label">Fingerprint</div><div class="value mono">${cert.PublicKeyFingerprint || ''}</div>
         ${cert.RenewedFromSerial ? `<div class="label">Renewed From</div><div class="value mono">${cert.RenewedFromSerial}</div>` : ''}
-        ${cert.RevocationReason ? `<div class="label">Revocation Reason</div><div class="value">${cert.RevocationReason}</div>` : ''}
+        ${cert.RevocationReason ? `<div class="label">Revocation Reason</div><div class="value"><span class="badge badge-revoked">${cert.RevocationReason}</span></div>` : ''}
+        ${cert.RevocationComment ? `<div class="label">Comment</div><div class="value">${cert.RevocationComment}</div>` : ''}
+        ${cert.RevokedBy ? `<div class="label">Revoked By</div><div class="value">${cert.RevokedBy}</div>` : ''}
+        ${cert.RevokedAt ? `<div class="label">Revoked At</div><div class="value mono">${cert.RevokedAt}</div>` : ''}
       </div>
       ${cert.CertificatePEM ? `<div class="pem-block">${cert.CertificatePEM}</div>` : ''}
       <div class="actions">
@@ -289,8 +306,12 @@ async function loadCAs() {
       <td class="mono truncate">${c.Serial}</td>
       <td><span class="badge badge-${c.Status}">${c.Status}</span></td>
       <td class="mono">${c.NotAfter ? c.NotAfter.split('T')[0] : ''}</td>
+      <td>
+        <a href="/crl/${c.ID}.crl" class="btn btn-sm" style="background:var(--surface2);color:var(--text)" download>CRL</a>
+        <a href="/v1/ca/${c.ID}/crl" class="btn btn-sm" style="background:var(--surface2);color:var(--text)" download>PEM</a>
+      </td>
     </tr>
-  `).join('') || '<tr><td colspan="6" class="loading">No CAs</td></tr>';
+  `).join('') || '<tr><td colspan="7" class="loading">No CAs</td></tr>';
 }
 
 // Audit

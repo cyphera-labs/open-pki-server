@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"math/big"
 	"net"
 	"net/http"
 	"strconv"
@@ -15,7 +14,7 @@ import (
 	"time"
 
 	"github.com/cyphera-labs/open-pki-server/internal/ca"
-	"github.com/cyphera-labs/open-pki-server/internal/cert"
+	"github.com/cyphera-labs/open-pki-server/internal/config"
 	"github.com/cyphera-labs/open-pki-server/internal/dashboard"
 	"github.com/cyphera-labs/open-pki-server/internal/profile"
 	"github.com/cyphera-labs/open-pki-server/internal/storage"
@@ -25,17 +24,17 @@ import (
 type Server struct {
 	store    *storage.Store
 	profiles map[string]*profile.Profile
+	cfg      *config.Config
 	mux      *http.ServeMux
-	apiKey   string
 }
 
 // NewServer creates a new API server.
-func NewServer(store *storage.Store, profiles map[string]*profile.Profile, apiKey string) *Server {
+func NewServer(store *storage.Store, profiles map[string]*profile.Profile, cfg *config.Config) *Server {
 	s := &Server{
 		store:    store,
 		profiles: profiles,
+		cfg:      cfg,
 		mux:      http.NewServeMux(),
-		apiKey:   apiKey,
 	}
 	s.routes()
 	return s
@@ -55,19 +54,20 @@ func (s *Server) routes() {
 	// CA
 	s.mux.HandleFunc("POST /v1/ca/root", s.auth(s.handleCreateRootCA))
 	s.mux.HandleFunc("GET /v1/ca", s.auth(s.handleListCAs))
-	s.mux.HandleFunc("GET /v1/ca/{id}", s.auth(s.handleGetCA))
 	s.mux.HandleFunc("GET /v1/ca/bundle", s.auth(s.handleCABundle))
+	s.mux.HandleFunc("GET /v1/ca/{id}", s.auth(s.handleGetCA))
+	s.mux.HandleFunc("GET /v1/ca/{id}/crl", s.auth(s.handleCRLForCA))
 
 	// Certificates
 	s.mux.HandleFunc("POST /v1/certificates/issue", s.auth(s.handleIssueCert))
+	s.mux.HandleFunc("POST /v1/certificates/renew", s.auth(s.handleRenewCert))
 	s.mux.HandleFunc("GET /v1/certificates", s.auth(s.handleListCerts))
 	s.mux.HandleFunc("GET /v1/certificates/expiring", s.auth(s.handleListExpiring))
 	s.mux.HandleFunc("GET /v1/certificates/{serial}", s.auth(s.handleGetCert))
 	s.mux.HandleFunc("POST /v1/certificates/{serial}/revoke", s.auth(s.handleRevokeCert))
-	s.mux.HandleFunc("POST /v1/certificates/renew", s.auth(s.handleRenewCert))
 
-	// CRL
-	s.mux.HandleFunc("GET /v1/crl", s.auth(s.handleCRL))
+	// CRL — public (no auth), DER format
+	s.mux.HandleFunc("GET /crl/", s.handlePublicCRL)
 
 	// Audit
 	s.mux.HandleFunc("GET /v1/audit", s.auth(s.handleAudit))
@@ -78,9 +78,9 @@ func (s *Server) routes() {
 
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.apiKey != "" {
+		if s.cfg.Server.APIKey != "" {
 			token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if token != s.apiKey {
+			if token != s.cfg.Server.APIKey {
 				jsonError(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -145,6 +145,7 @@ func (s *Server) handleCreateRootCA(w http.ResponseWriter, r *http.Request) {
 		"serial":  fmt.Sprintf("%X", result.Certificate.SerialNumber),
 		"subject": result.Certificate.Subject.String(),
 		"expires": result.Certificate.NotAfter.Format(time.RFC3339),
+		"crl_url": s.cfg.CRLURL(caID),
 	})
 }
 
@@ -168,7 +169,15 @@ func (s *Server) handleGetCA(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "CA not found", http.StatusNotFound)
 		return
 	}
-	jsonResp(w, rec)
+
+	// Count revoked certs for this CA
+	revoked, _ := s.store.ListRevoked(id)
+
+	jsonResp(w, map[string]any{
+		"ca":            rec,
+		"crl_url":       s.cfg.CRLURL(id),
+		"revoked_count": len(revoked),
+	})
 }
 
 func (s *Server) handleCABundle(w http.ResponseWriter, r *http.Request) {
@@ -208,7 +217,6 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Load CA from store
 	caRec, err := s.store.GetCA(req.CAID)
 	if err != nil {
 		jsonError(w, "CA not found", http.StatusNotFound)
@@ -236,18 +244,28 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	certPEM, _, err := loadedCA.IssueCert(ca.IssueCertOptions{
+	issueOpts := ca.IssueCertOptions{
 		CommonName: req.CN,
 		DNSNames:   dnsNames,
 		IPs:        ips,
 		Profile:    prof,
-	})
+	}
+
+	// Add CRL Distribution Point if configured
+	if s.cfg.Revocation.CRLEnabled && s.cfg.Revocation.IncludeCRLDistributionPoints {
+		issueOpts.CRLURL = s.cfg.CRLURL(req.CAID)
+	}
+	// Add OCSP URL if configured
+	if s.cfg.Revocation.OCSPEnabled && s.cfg.Revocation.IncludeOCSPURL {
+		issueOpts.OCSPURL = s.cfg.OCSPURL()
+	}
+
+	certPEM, _, err := loadedCA.IssueCert(issueOpts)
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// Parse the issued cert for storage
 	block, _ := pem.Decode(certPEM)
 	issuedCert, _ := x509.ParseCertificate(block.Bytes)
 	fingerprint := sha256.Sum256(issuedCert.RawSubjectPublicKeyInfo)
@@ -270,7 +288,7 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = s.store.InsertAudit("api", "cert.issued", "certificate", fmt.Sprintf("%d", certID), map[string]any{
+	_ = s.store.InsertAudit("api", "certificate.issued", "certificate", fmt.Sprintf("%d", certID), map[string]any{
 		"cn": req.CN, "profile": req.Profile, "serial": fmt.Sprintf("%X", issuedCert.SerialNumber),
 	})
 
@@ -285,7 +303,8 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListCerts(w http.ResponseWriter, r *http.Request) {
-	certs, err := s.store.ListCerts()
+	status := r.URL.Query().Get("status")
+	certs, err := s.store.ListCertsFiltered(status)
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -321,21 +340,38 @@ func (s *Server) handleListExpiring(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRevokeCert(w http.ResponseWriter, r *http.Request) {
 	serial := r.PathValue("serial")
 	var req struct {
-		Reason string `json:"reason"`
+		Reason  string `json:"reason"`
+		Comment string `json:"comment"`
+		Actor   string `json:"actor"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 	if req.Reason == "" {
 		req.Reason = "unspecified"
 	}
+	if req.Actor == "" {
+		req.Actor = "api"
+	}
 
-	if err := s.store.RevokeCert(serial, req.Reason); err != nil {
+	if !storage.ValidRevocationReason(req.Reason) {
+		jsonError(w, fmt.Sprintf("invalid revocation reason: %s", req.Reason), http.StatusBadRequest)
+		return
+	}
+
+	if err := s.store.RevokeCert(storage.RevokeOpts{
+		Serial:  serial,
+		Reason:  req.Reason,
+		Comment: req.Comment,
+		Actor:   req.Actor,
+	}); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	_ = s.store.InsertAudit("api", "cert.revoked", "certificate", serial, map[string]any{"reason": req.Reason})
+	_ = s.store.InsertAudit(req.Actor, "certificate.revoked", "certificate", serial, map[string]any{
+		"reason": req.Reason, "comment": req.Comment,
+	})
 
-	jsonResp(w, map[string]string{"status": "revoked", "serial": serial})
+	jsonResp(w, map[string]string{"status": "revoked", "serial": serial, "reason": req.Reason})
 }
 
 func (s *Server) handleRenewCert(w http.ResponseWriter, r *http.Request) {
@@ -347,7 +383,6 @@ func (s *Server) handleRenewCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get the original cert
 	orig, err := s.store.GetCertBySerial(req.Serial)
 	if err != nil {
 		jsonError(w, "certificate not found", http.StatusNotFound)
@@ -364,7 +399,6 @@ func (s *Server) handleRenewCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Load CA
 	caRec, err := s.store.GetCA(orig.CAID)
 	if err != nil {
 		jsonError(w, "CA not found", http.StatusInternalServerError)
@@ -381,16 +415,23 @@ func (s *Server) handleRenewCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse original cert for SANs
 	origBlock, _ := pem.Decode([]byte(orig.CertificatePEM))
 	origCert, _ := x509.ParseCertificate(origBlock.Bytes)
 
-	certPEM, _, err := loadedCA.IssueCert(ca.IssueCertOptions{
+	issueOpts := ca.IssueCertOptions{
 		CommonName: orig.CommonName,
 		DNSNames:   origCert.DNSNames,
 		IPs:        origCert.IPAddresses,
 		Profile:    prof,
-	})
+	}
+	if s.cfg.Revocation.CRLEnabled && s.cfg.Revocation.IncludeCRLDistributionPoints {
+		issueOpts.CRLURL = s.cfg.CRLURL(orig.CAID)
+	}
+	if s.cfg.Revocation.OCSPEnabled && s.cfg.Revocation.IncludeOCSPURL {
+		issueOpts.OCSPURL = s.cfg.OCSPURL()
+	}
+
+	certPEM, _, err := loadedCA.IssueCert(issueOpts)
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -419,78 +460,103 @@ func (s *Server) handleRenewCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Revoke the old cert
-	_ = s.store.RevokeCert(orig.Serial, "superseded")
+	// Revoke old cert as superseded
+	_ = s.store.RevokeCert(storage.RevokeOpts{Serial: orig.Serial, Reason: "superseded", Actor: "api"})
 
-	_ = s.store.InsertAudit("api", "cert.renewed", "certificate", fmt.Sprintf("%d", newID), map[string]any{
+	_ = s.store.InsertAudit("api", "certificate.renewed", "certificate", fmt.Sprintf("%d", newID), map[string]any{
 		"old_serial": orig.Serial, "new_serial": fmt.Sprintf("%X", newCert.SerialNumber),
 	})
 
 	jsonResp(w, map[string]any{
-		"id":                newID,
-		"serial":            fmt.Sprintf("%X", newCert.SerialNumber),
-		"renewed_from":      orig.Serial,
-		"expires":           newCert.NotAfter.Format(time.RFC3339),
-		"certificate":       string(certPEM),
+		"id":           newID,
+		"serial":       fmt.Sprintf("%X", newCert.SerialNumber),
+		"renewed_from": orig.Serial,
+		"expires":      newCert.NotAfter.Format(time.RFC3339),
+		"certificate":  string(certPEM),
 	})
 }
 
-func (s *Server) handleCRL(w http.ResponseWriter, r *http.Request) {
-	caIDStr := r.URL.Query().Get("ca_id")
-	if caIDStr == "" {
-		caIDStr = "1"
-	}
-	caID, _ := strconv.ParseInt(caIDStr, 10, 64)
-
-	caRec, err := s.store.GetCA(caID)
+// handleCRLForCA returns CRL for a CA via /v1/ca/{id}/crl (PEM by default, DER with Accept header)
+func (s *Server) handleCRLForCA(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		jsonError(w, "CA not found", http.StatusNotFound)
+		jsonError(w, "invalid CA ID", http.StatusBadRequest)
 		return
 	}
-	keyPEM, err := s.store.GetKey("ca", caRec.ID)
-	if err != nil {
-		jsonError(w, "CA key not found", http.StatusInternalServerError)
-		return
-	}
-	loadedCA, err := ca.LoadCAFromPEM([]byte(caRec.CertificatePEM), []byte(keyPEM))
-	if err != nil {
-		jsonError(w, fmt.Sprintf("load CA: %s", err), http.StatusInternalServerError)
-		return
-	}
-
-	entries, err := s.store.ListRevoked(caID)
+	crlDER, err := s.generateCRL(id)
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	var revokedCerts []x509.RevocationListEntry
-	for _, e := range entries {
-		serial := new(big.Int)
-		serial.SetString(e.Serial, 16)
-		revokedCerts = append(revokedCerts, x509.RevocationListEntry{
-			SerialNumber:   serial,
-			RevocationTime: e.RevokedAt,
-		})
-	}
-
-	now := time.Now().UTC()
-	crlTemplate := &x509.RevocationList{
-		Number:              big.NewInt(time.Now().Unix()),
-		ThisUpdate:          now,
-		NextUpdate:          now.Add(24 * time.Hour),
-		RevokedCertificateEntries: revokedCerts,
-	}
-
-	crlDER, err := x509.CreateRevocationList(nil, crlTemplate, loadedCA.Certificate, loadedCA.PrivateKey)
-	if err != nil {
-		jsonError(w, fmt.Sprintf("create CRL: %s", err), http.StatusInternalServerError)
-		return
-	}
-
+	// Return PEM for API consumers
 	crlPEM := pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlDER})
 	w.Header().Set("Content-Type", "application/x-pem-file")
 	w.Write(crlPEM)
+
+	_ = s.store.InsertAudit("api", "crl.downloaded", "ca", fmt.Sprintf("%d", id), nil)
+}
+
+// handlePublicCRL returns CRL in DER format at /crl/{id}.crl
+func (s *Server) handlePublicCRL(w http.ResponseWriter, r *http.Request) {
+	// Parse CA ID from path like /crl/1.crl
+	path := strings.TrimPrefix(r.URL.Path, "/crl/")
+	path = strings.TrimSuffix(path, ".crl")
+	caID, err := strconv.ParseInt(path, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid CA ID", http.StatusBadRequest)
+		return
+	}
+	crlDER, err := s.generateCRL(caID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/pkix-crl")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%d.crl", caID))
+	w.Write(crlDER)
+}
+
+func (s *Server) generateCRL(caID int64) ([]byte, error) {
+	caRec, err := s.store.GetCA(caID)
+	if err != nil {
+		return nil, fmt.Errorf("CA not found")
+	}
+	keyPEM, err := s.store.GetKey("ca", caRec.ID)
+	if err != nil {
+		return nil, fmt.Errorf("CA key not found")
+	}
+	loadedCA, err := ca.LoadCAFromPEM([]byte(caRec.CertificatePEM), []byte(keyPEM))
+	if err != nil {
+		return nil, fmt.Errorf("load CA: %s", err)
+	}
+
+	entries, err := s.store.ListRevoked(caID)
+	if err != nil {
+		return nil, err
+	}
+
+	var crlEntries []ca.CRLEntry
+	for _, e := range entries {
+		crlEntries = append(crlEntries, ca.CRLEntry{SerialHex: e.Serial, RevokedAt: e.RevokedAt})
+	}
+
+	validityHours := s.cfg.Revocation.CRLValidityHours
+	if validityHours <= 0 {
+		validityHours = 24
+	}
+
+	crlDER, err := ca.GenerateCRL(loadedCA, crlEntries, validityHours)
+	if err != nil {
+		return nil, fmt.Errorf("create CRL: %s", err)
+	}
+
+	_ = s.store.InsertAudit("system", "crl.generated", "ca", fmt.Sprintf("%d", caID), map[string]any{
+		"revoked_count": len(crlEntries),
+	})
+
+	return crlDER, nil
 }
 
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
@@ -528,10 +594,4 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
-}
-
-// InspectCert is a helper for the API to return cert info.
-func InspectCert(certPEM string) *cert.Info {
-	info, _ := cert.InspectPEM([]byte(certPEM))
-	return info
 }

@@ -108,6 +108,8 @@ type IssueCertOptions struct {
 	Profile    *profile.Profile
 	OutputDir  string
 	OutputName string
+	CRLURL     string // CRL Distribution Point URL to embed in cert
+	OCSPURL    string // OCSP responder URL to embed in cert
 }
 
 // IssueCert creates a certificate signed by this CA.
@@ -156,6 +158,16 @@ func (ca *CA) IssueCert(opts IssueCertOptions) (certPEM, keyPEM []byte, err erro
 		template.KeyUsage = x509.KeyUsageDigitalSignature
 	default:
 		template.KeyUsage = x509.KeyUsageDigitalSignature
+	}
+
+	// CRL Distribution Point
+	if opts.CRLURL != "" {
+		template.CRLDistributionPoints = []string{opts.CRLURL}
+	}
+
+	// Authority Information Access — OCSP
+	if opts.OCSPURL != "" {
+		template.OCSPServer = []string{opts.OCSPURL}
 	}
 
 	certDER, err := x509.CreateCertificate(rand.Reader, template, ca.Certificate, pub, ca.PrivateKey)
@@ -245,6 +257,44 @@ func LoadCA(certPath, keyPath string) (*CA, error) {
 		CertPEM:     certPEM,
 		KeyPEM:      keyPEM,
 	}, nil
+}
+
+// CRLEntry represents a single revoked certificate for CRL generation.
+type CRLEntry struct {
+	SerialHex string
+	RevokedAt time.Time
+}
+
+// GenerateCRL creates a signed CRL from revoked entries.
+func GenerateCRL(issuer *CA, entries []CRLEntry, validityHours int) ([]byte, error) {
+	if validityHours <= 0 {
+		validityHours = 24
+	}
+
+	var revokedCerts []x509.RevocationListEntry
+	for _, e := range entries {
+		serial := new(big.Int)
+		serial.SetString(e.SerialHex, 16)
+		revokedCerts = append(revokedCerts, x509.RevocationListEntry{
+			SerialNumber:   serial,
+			RevocationTime: e.RevokedAt,
+		})
+	}
+
+	now := time.Now().UTC()
+	template := &x509.RevocationList{
+		Number:                    big.NewInt(now.Unix()),
+		ThisUpdate:                now,
+		NextUpdate:                now.Add(time.Duration(validityHours) * time.Hour),
+		RevokedCertificateEntries: revokedCerts,
+	}
+
+	return x509.CreateRevocationList(nil, template, issuer.Certificate, issuer.PrivateKey)
+}
+
+// EncodeCRLPEM wraps DER-encoded CRL bytes in PEM.
+func EncodeCRLPEM(der []byte) []byte {
+	return pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: der})
 }
 
 // --- helpers ---

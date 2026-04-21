@@ -11,6 +11,7 @@ import (
 	"github.com/cyphera-labs/open-pki-server/internal/api"
 	"github.com/cyphera-labs/open-pki-server/internal/ca"
 	"github.com/cyphera-labs/open-pki-server/internal/cert"
+	"github.com/cyphera-labs/open-pki-server/internal/config"
 	"github.com/cyphera-labs/open-pki-server/internal/profile"
 	"github.com/cyphera-labs/open-pki-server/internal/storage"
 	"github.com/spf13/cobra"
@@ -29,6 +30,9 @@ func main() {
 		inspectCmd(),
 		verifyCmd(),
 		bundleCmd(),
+		revokeCmd(),
+		crlCmd(),
+		listCmd(),
 		serveCmd(),
 	)
 
@@ -240,16 +244,192 @@ func bundleCmd() *cobra.Command {
 	return cmd
 }
 
+func revokeCmd() *cobra.Command {
+	var (
+		serial  string
+		reason  string
+		comment string
+		dbPath  string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "revoke",
+		Short: "Revoke a certificate",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if serial == "" {
+				return fmt.Errorf("--serial is required")
+			}
+			if reason == "" {
+				reason = "unspecified"
+			}
+			if !storage.ValidRevocationReason(reason) {
+				return fmt.Errorf("invalid reason %q (valid: unspecified, key_compromise, ca_compromise, affiliation_changed, superseded, cessation_of_operation, certificate_hold, remove_from_crl, privilege_withdrawn, aa_compromise)", reason)
+			}
+
+			store, err := storage.Open(dbPath)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			if err := store.RevokeCert(storage.RevokeOpts{
+				Serial: serial, Reason: reason, Comment: comment, Actor: "cli",
+			}); err != nil {
+				return err
+			}
+			_ = store.InsertAudit("cli", "certificate.revoked", "certificate", serial, map[string]any{
+				"reason": reason, "comment": comment,
+			})
+			fmt.Printf("Certificate revoked: %s (reason: %s)\n", serial, reason)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&serial, "serial", "", "Certificate serial number (required)")
+	cmd.Flags().StringVar(&reason, "reason", "unspecified", "Revocation reason")
+	cmd.Flags().StringVar(&comment, "comment", "", "Revocation comment")
+	cmd.Flags().StringVar(&dbPath, "db", "./open-pki.db", "SQLite database path")
+	return cmd
+}
+
+func crlCmd() *cobra.Command {
+	var (
+		caName string
+		caID   int64
+		dbPath string
+		outFile string
+		format  string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "crl",
+		Short: "Generate and export a CRL for a CA",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := storage.Open(dbPath)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			var caRec *storage.CARecord
+			if caName != "" {
+				caRec, err = store.GetCAByName(caName)
+			} else {
+				caRec, err = store.GetCA(caID)
+			}
+			if err != nil {
+				return fmt.Errorf("CA not found: %w", err)
+			}
+
+			keyPEM, err := store.GetKey("ca", caRec.ID)
+			if err != nil {
+				return fmt.Errorf("CA key not found: %w", err)
+			}
+			loadedCA, err := ca.LoadCAFromPEM([]byte(caRec.CertificatePEM), []byte(keyPEM))
+			if err != nil {
+				return fmt.Errorf("load CA: %w", err)
+			}
+
+			entries, err := store.ListRevoked(caRec.ID)
+			if err != nil {
+				return err
+			}
+
+			var crlEntries []ca.CRLEntry
+			for _, e := range entries {
+				crlEntries = append(crlEntries, ca.CRLEntry{SerialHex: e.Serial, RevokedAt: e.RevokedAt})
+			}
+			crlDER, err := ca.GenerateCRL(loadedCA, crlEntries, 24)
+			if err != nil {
+				return err
+			}
+
+			_ = store.InsertAudit("cli", "crl.generated", "ca", fmt.Sprintf("%d", caRec.ID), map[string]any{
+				"revoked_count": len(entries),
+			})
+
+			if outFile != "" {
+				var data []byte
+				if format == "der" {
+					data = crlDER
+				} else {
+					data = ca.EncodeCRLPEM(crlDER)
+				}
+				if err := os.WriteFile(outFile, data, 0644); err != nil {
+					return err
+				}
+				fmt.Printf("CRL written: %s (%d revoked entries, format: %s)\n", outFile, len(entries), format)
+			} else {
+				// Print to stdout
+				if format == "der" {
+					os.Stdout.Write(crlDER)
+				} else {
+					os.Stdout.Write(ca.EncodeCRLPEM(crlDER))
+				}
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&caName, "ca", "", "CA name")
+	cmd.Flags().Int64Var(&caID, "ca-id", 1, "CA ID")
+	cmd.Flags().StringVar(&dbPath, "db", "./open-pki.db", "SQLite database path")
+	cmd.Flags().StringVarP(&outFile, "out", "o", "", "Output file (omit for stdout)")
+	cmd.Flags().StringVar(&format, "format", "pem", "Output format (pem or der)")
+	return cmd
+}
+
+func listCmd() *cobra.Command {
+	var (
+		status string
+		dbPath string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List certificates",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := storage.Open(dbPath)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			certs, err := store.ListCertsFiltered(status)
+			if err != nil {
+				return err
+			}
+
+			if len(certs) == 0 {
+				fmt.Println("No certificates found.")
+				return nil
+			}
+
+			fmt.Printf("%-20s %-15s %-10s %-10s %s\n", "COMMON NAME", "PROFILE", "STATUS", "EXPIRES", "SERIAL")
+			for _, c := range certs {
+				expires := c.NotAfter.Format("2006-01-02")
+				fmt.Printf("%-20s %-15s %-10s %-10s %s\n", c.CommonName, c.Profile, c.Status, expires, c.Serial)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&status, "status", "", "Filter by status (active, revoked, expired)")
+	cmd.Flags().StringVar(&dbPath, "db", "./open-pki.db", "SQLite database path")
+	return cmd
+}
+
 func serveCmd() *cobra.Command {
 	var (
-		addr   string
-		dbPath string
-		apiKey string
+		addr      string
+		dbPath    string
+		apiKey    string
+		baseURL   string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Start the PKI server with REST API",
+		Short: "Start the PKI server with REST API and dashboard",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := storage.Open(dbPath)
 			if err != nil {
@@ -257,15 +437,23 @@ func serveCmd() *cobra.Command {
 			}
 			defer store.Close()
 
+			cfg := config.Default()
+			cfg.Server.APIKey = apiKey
+			if baseURL != "" {
+				cfg.Server.PublicBaseURL = baseURL
+			}
+
 			profiles := profile.Defaults()
-			srv := api.NewServer(store, profiles, apiKey)
+			srv := api.NewServer(store, profiles, cfg)
 
 			log.Printf("Cyphera Open PKI Server listening on %s", addr)
-			log.Printf("  Database: %s", dbPath)
+			log.Printf("  Database:  %s", dbPath)
+			log.Printf("  Base URL:  %s", cfg.Server.PublicBaseURL)
+			log.Printf("  CRL:       %s/crl/{ca_id}.crl", cfg.Server.PublicBaseURL)
 			if apiKey != "" {
-				log.Printf("  API key:  enabled")
+				log.Printf("  API key:   enabled")
 			} else {
-				log.Printf("  API key:  disabled (no auth)")
+				log.Printf("  API key:   disabled (no auth)")
 			}
 			return http.ListenAndServe(addr, srv.Handler())
 		},
@@ -274,6 +462,7 @@ func serveCmd() *cobra.Command {
 	cmd.Flags().StringVar(&addr, "addr", ":8300", "Listen address")
 	cmd.Flags().StringVar(&dbPath, "db", "./open-pki.db", "SQLite database path")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "API key for authentication (optional)")
+	cmd.Flags().StringVar(&baseURL, "base-url", "http://localhost:8300", "Public base URL for CRL/OCSP URLs embedded in certificates")
 
 	return cmd
 }
