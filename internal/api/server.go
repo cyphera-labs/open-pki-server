@@ -80,8 +80,9 @@ func (s *Server) routes() {
 	// Audit
 	s.mux.HandleFunc("GET /v1/audit", s.auth(s.handleAudit))
 
-	// Stats
+	// Stats + Metrics
 	s.mux.HandleFunc("GET /v1/stats", s.auth(s.handleStats))
+	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 }
 
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
@@ -145,7 +146,11 @@ func (s *Server) handleCreateRootCA(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = s.store.InsertKey("ca", caID, "local", string(result.KeyPEM), req.Algorithm)
-	_ = s.store.InsertAudit("api", "ca.created", "ca", fmt.Sprintf("%d", caID), map[string]any{"name": req.Name})
+
+	// Register in asset graph
+	assetID := fmt.Sprintf("ca:%s", fmt.Sprintf("%X", result.Certificate.SerialNumber))
+	_ = s.store.RegisterAsset(assetID, "certificate_authority", fmt.Sprintf("%d", caID), req.Name, "active")
+	_ = s.store.EmitLifecycleEvent(assetID, "ca.created", "api", map[string]any{"name": req.Name})
 
 	jsonResp(w, map[string]any{
 		"id":      caID,
@@ -296,13 +301,21 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = s.store.InsertAudit("api", "certificate.issued", "certificate", fmt.Sprintf("%d", certID), map[string]any{
-		"cn": req.CN, "profile": req.Profile, "serial": fmt.Sprintf("%X", issuedCert.SerialNumber),
+	// Register in asset graph
+	certSerial := fmt.Sprintf("%X", issuedCert.SerialNumber)
+	certAssetID := fmt.Sprintf("cert:%s", certSerial)
+	caAssetID := fmt.Sprintf("ca:%s", caRec.Serial)
+	_ = s.store.RegisterAsset(certAssetID, "certificate", certSerial, req.CN, "active")
+	_ = s.store.SetMetadata(certAssetID, "profile", req.Profile)
+	_ = s.store.SetMetadata(certAssetID, "issuance_mode", "generated")
+	_ = s.store.AddRelationship(certAssetID, "issued_by", caAssetID, nil)
+	_ = s.store.EmitLifecycleEvent(certAssetID, "certificate.issued", "api", map[string]any{
+		"cn": req.CN, "profile": req.Profile,
 	})
 
 	jsonResp(w, map[string]any{
 		"id":          certID,
-		"serial":      fmt.Sprintf("%X", issuedCert.SerialNumber),
+		"serial":      certSerial,
 		"common_name": req.CN,
 		"profile":     req.Profile,
 		"expires":     issuedCert.NotAfter.Format(time.RFC3339),
@@ -327,7 +340,24 @@ func (s *Server) handleGetCert(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "certificate not found", http.StatusNotFound)
 		return
 	}
-	jsonResp(w, rec)
+
+	// Build combined view: PKI data + asset context
+	assetID := fmt.Sprintf("cert:%s", serial)
+	meta, _ := s.store.GetMetadata(assetID)
+	tags, _ := s.store.GetTags(assetID)
+	rels, _ := s.store.GetRelationships(assetID)
+	events, _ := s.store.ListLifecycleEvents(assetID, 20)
+
+	jsonResp(w, map[string]any{
+		"certificate": rec,
+		"asset": map[string]any{
+			"id":            assetID,
+			"metadata":      meta,
+			"tags":          tags,
+			"relationships": rels,
+			"events":        events,
+		},
+	})
 }
 
 func (s *Server) handleListExpiring(w http.ResponseWriter, r *http.Request) {
@@ -375,7 +405,10 @@ func (s *Server) handleRevokeCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = s.store.InsertAudit(req.Actor, "certificate.revoked", "certificate", serial, map[string]any{
+	// Update asset graph
+	certAssetID := fmt.Sprintf("cert:%s", serial)
+	_ = s.store.RegisterAsset(certAssetID, "certificate", serial, "", "revoked")
+	_ = s.store.EmitLifecycleEvent(certAssetID, "certificate.revoked", req.Actor, map[string]any{
 		"reason": req.Reason, "comment": req.Comment,
 	})
 
@@ -708,65 +741,12 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleInventory(w http.ResponseWriter, r *http.Request) {
-	cas, _ := s.store.ListCAs()
-	certs, _ := s.store.ListCerts()
-
-	var records []map[string]any
-
-	for _, c := range cas {
-		records = append(records, map[string]any{
-			"id":          fmt.Sprintf("ca:%s", c.Serial),
-			"type":        "certificate_authority",
-			"source":      "open-pki-server",
-			"name":        c.Name,
-			"status":      c.Status,
-			"created_at":  c.CreatedAt.Format(time.RFC3339),
-			"expires_at":  c.NotAfter.Format(time.RFC3339),
-			"fingerprint": c.Serial,
-			"metadata": map[string]any{
-				"ca_type": c.Type,
-				"subject": c.Subject,
-			},
-		})
+	views, err := s.store.ListInventory()
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
-
-	for _, c := range certs {
-		rec := map[string]any{
-			"id":          fmt.Sprintf("cert:%s", c.Serial),
-			"type":        "certificate",
-			"source":      "open-pki-server",
-			"name":        c.CommonName,
-			"status":      c.Status,
-			"created_at":  c.CreatedAt.Format(time.RFC3339),
-			"expires_at":  c.NotAfter.Format(time.RFC3339),
-			"fingerprint": c.PublicKeyFingerprint,
-			"relationships": []map[string]string{
-				{"type": "issued_by", "target": fmt.Sprintf("ca:%d", c.CAID)},
-			},
-			"metadata": map[string]any{
-				"subject":      c.Subject,
-				"common_name":  c.CommonName,
-				"sans":         c.SANs,
-				"profile":      c.Profile,
-				"serial":       c.Serial,
-				"key_algorithm": "ed25519",
-			},
-		}
-		if c.RenewedFromSerial != "" {
-			rec["relationships"] = append(rec["relationships"].([]map[string]string),
-				map[string]string{"type": "renewed_from", "target": fmt.Sprintf("cert:%s", c.RenewedFromSerial)})
-		}
-		if c.Status == "revoked" {
-			rec["revoked_at"] = ""
-			if c.RevokedAt != nil {
-				rec["revoked_at"] = c.RevokedAt.Format(time.RFC3339)
-			}
-			rec["revocation_reason"] = c.RevocationReason
-		}
-		records = append(records, rec)
-	}
-
-	jsonResp(w, records)
+	jsonResp(w, views)
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -776,6 +756,26 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResp(w, stats)
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	stats, _ := s.store.GetStats()
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprintf(w, "# HELP open_pki_cas_total Total certificate authorities\n")
+	fmt.Fprintf(w, "# TYPE open_pki_cas_total gauge\n")
+	fmt.Fprintf(w, "open_pki_cas_total %d\n", stats.TotalCAs)
+	fmt.Fprintf(w, "# HELP open_pki_certificates_total Total certificates\n")
+	fmt.Fprintf(w, "# TYPE open_pki_certificates_total gauge\n")
+	fmt.Fprintf(w, "open_pki_certificates_total %d\n", stats.TotalCerts)
+	fmt.Fprintf(w, "# HELP open_pki_certificates_active Active certificates\n")
+	fmt.Fprintf(w, "# TYPE open_pki_certificates_active gauge\n")
+	fmt.Fprintf(w, "open_pki_certificates_active %d\n", stats.ActiveCerts)
+	fmt.Fprintf(w, "# HELP open_pki_certificates_revoked Revoked certificates\n")
+	fmt.Fprintf(w, "# TYPE open_pki_certificates_revoked gauge\n")
+	fmt.Fprintf(w, "open_pki_certificates_revoked %d\n", stats.RevokedCerts)
+	fmt.Fprintf(w, "# HELP open_pki_certificates_expiring_soon Certificates expiring within 30 days\n")
+	fmt.Fprintf(w, "# TYPE open_pki_certificates_expiring_soon gauge\n")
+	fmt.Fprintf(w, "open_pki_certificates_expiring_soon %d\n", stats.ExpiringSoon)
 }
 
 // --- Helpers ---
