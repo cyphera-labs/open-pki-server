@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
+	"crypto/subtle"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -47,8 +48,14 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) routes() {
-	// Dashboard
-	s.mux.Handle("/", dashboard.Handler())
+	// Dashboard — public when no API key, auth-protected when key is set
+	if s.cfg.Server.APIKey != "" {
+		s.mux.Handle("/", s.auth(func(w http.ResponseWriter, r *http.Request) {
+			dashboard.Handler().ServeHTTP(w, r)
+		}))
+	} else {
+		s.mux.Handle("/", dashboard.Handler())
+	}
 
 	s.mux.HandleFunc("GET /v1/health", s.handleHealth)
 
@@ -89,7 +96,7 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.cfg.Server.APIKey != "" {
 			token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if token != s.cfg.Server.APIKey {
+			if subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.Server.APIKey)) != 1 {
 				jsonError(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -705,30 +712,8 @@ func (s *Server) generateCRL(caID int64) ([]byte, error) {
 }
 
 func (s *Server) handleOCSP(w http.ResponseWriter, r *http.Request) {
-	// For MVP: use the first CA. A production OCSP responder would match
-	// the issuer from the OCSP request against stored CAs.
-	cas, err := s.store.ListCAs()
-	if err != nil || len(cas) == 0 {
-		http.Error(w, "no CA available", http.StatusInternalServerError)
-		return
-	}
-	caRec := cas[0]
-	keyPEM, err := s.store.GetKey("ca", caRec.ID)
-	if err != nil {
-		http.Error(w, "CA key not found", http.StatusInternalServerError)
-		return
-	}
-	loadedCA, err := ca.LoadCAFromPEM([]byte(caRec.CertificatePEM), []byte(keyPEM))
-	if err != nil {
-		http.Error(w, "load CA failed", http.StatusInternalServerError)
-		return
-	}
-
 	responder := pkiocsp.NewResponder(s.store, s.cfg.Revocation.OCSPResponseValidityMinutes)
-	responder.Handle(&pkiocsp.CAContext{
-		Certificate: loadedCA.Certificate,
-		PrivateKey:  loadedCA.PrivateKey,
-	})(w, r)
+	responder.Handler()(w, r)
 }
 
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
