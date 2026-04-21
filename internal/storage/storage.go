@@ -89,7 +89,7 @@ func (s *Store) migrate() error {
 			owner_type        TEXT NOT NULL CHECK(owner_type IN ('ca', 'certificate')),
 			owner_id          INTEGER NOT NULL,
 			key_ref           TEXT NOT NULL DEFAULT 'local',
-			encrypted_key_pem TEXT NOT NULL,
+			key_pem TEXT NOT NULL,
 			algorithm         TEXT NOT NULL,
 			created_at        TEXT NOT NULL DEFAULT (datetime('now'))
 		);
@@ -508,14 +508,14 @@ func (s *Store) ListRevoked(caID int64) ([]RevokedEntry, error) {
 
 func (s *Store) InsertKey(ownerType string, ownerID int64, keyRef, encryptedPEM, algorithm string) error {
 	_, err := s.db.Exec(`
-		INSERT INTO private_keys (owner_type, owner_id, key_ref, encrypted_key_pem, algorithm)
+		INSERT INTO private_keys (owner_type, owner_id, key_ref, key_pem, algorithm)
 		VALUES (?, ?, ?, ?, ?)`, ownerType, ownerID, keyRef, encryptedPEM, algorithm)
 	return err
 }
 
 func (s *Store) GetKey(ownerType string, ownerID int64) (string, error) {
 	var keyPEM string
-	err := s.db.QueryRow(`SELECT encrypted_key_pem FROM private_keys WHERE owner_type = ? AND owner_id = ?`, ownerType, ownerID).Scan(&keyPEM)
+	err := s.db.QueryRow(`SELECT key_pem FROM private_keys WHERE owner_type = ? AND owner_id = ?`, ownerType, ownerID).Scan(&keyPEM)
 	return keyPEM, err
 }
 

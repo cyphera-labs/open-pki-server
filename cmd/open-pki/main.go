@@ -458,7 +458,7 @@ func crlCmd() *cobra.Command {
 
 			var crlEntries []ca.CRLEntry
 			for _, e := range entries {
-				crlEntries = append(crlEntries, ca.CRLEntry{SerialHex: e.Serial, RevokedAt: e.RevokedAt})
+				crlEntries = append(crlEntries, ca.CRLEntry{SerialHex: e.Serial, RevokedAt: e.RevokedAt, ReasonCode: e.ReasonCode})
 			}
 			crlDER, err := ca.GenerateCRL(loadedCA, crlEntries, 24)
 			if err != nil {

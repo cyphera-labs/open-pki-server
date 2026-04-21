@@ -364,8 +364,9 @@ func LoadCA(certPath, keyPath string) (*CA, error) {
 
 // CRLEntry represents a single revoked certificate for CRL generation.
 type CRLEntry struct {
-	SerialHex string
-	RevokedAt time.Time
+	SerialHex  string
+	RevokedAt  time.Time
+	ReasonCode int
 }
 
 // GenerateCRL creates a signed CRL from revoked entries.
@@ -378,10 +379,14 @@ func GenerateCRL(issuerCA *CA, entries []CRLEntry, validityHours int) ([]byte, e
 	for _, e := range entries {
 		serial := new(big.Int)
 		serial.SetString(e.SerialHex, 16)
-		revokedCerts = append(revokedCerts, x509.RevocationListEntry{
+		entry := x509.RevocationListEntry{
 			SerialNumber:   serial,
 			RevocationTime: e.RevokedAt,
-		})
+		}
+		if e.ReasonCode > 0 {
+			entry.ReasonCode = e.ReasonCode
+		}
+		revokedCerts = append(revokedCerts, entry)
 	}
 
 	now := time.Now().UTC()
@@ -392,7 +397,7 @@ func GenerateCRL(issuerCA *CA, entries []CRLEntry, validityHours int) ([]byte, e
 		RevokedCertificateEntries: revokedCerts,
 	}
 
-	return x509.CreateRevocationList(nil, template, issuerCA.Certificate, issuerCA.PrivateKey)
+	return x509.CreateRevocationList(rand.Reader, template, issuerCA.Certificate, issuerCA.PrivateKey)
 }
 
 // EncodeCRLPEM wraps DER-encoded CRL bytes in PEM.

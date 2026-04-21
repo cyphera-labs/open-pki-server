@@ -273,13 +273,13 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 		issueOpts.OCSPURL = s.cfg.OCSPURL()
 	}
 
-	certPEM, _, err := loadedCA.IssueCert(issueOpts)
+	issuedCertPEM, issuedKeyPEM, err := loadedCA.IssueCert(issueOpts)
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	block, _ := pem.Decode(certPEM)
+	block, _ := pem.Decode(issuedCertPEM)
 	issuedCert, _ := x509.ParseCertificate(block.Bytes)
 	fingerprint := sha256.Sum256(issuedCert.RawSubjectPublicKeyInfo)
 
@@ -292,7 +292,7 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 		Profile:              req.Profile,
 		NotBefore:            issuedCert.NotBefore,
 		NotAfter:             issuedCert.NotAfter,
-		CertificatePEM:       string(certPEM),
+		CertificatePEM:       string(issuedCertPEM),
 		PublicKeyFingerprint: hex.EncodeToString(fingerprint[:]),
 		Status:               "active",
 	})
@@ -301,7 +301,6 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Register in asset graph
 	certSerial := fmt.Sprintf("%X", issuedCert.SerialNumber)
 	certAssetID := fmt.Sprintf("cert:%s", certSerial)
 	caAssetID := fmt.Sprintf("ca:%s", caRec.Serial)
@@ -313,14 +312,18 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 		"cn": req.CN, "profile": req.Profile,
 	})
 
-	jsonResp(w, map[string]any{
+	resp := map[string]any{
 		"id":          certID,
 		"serial":      certSerial,
 		"common_name": req.CN,
 		"profile":     req.Profile,
 		"expires":     issuedCert.NotAfter.Format(time.RFC3339),
-		"certificate": string(certPEM),
-	})
+		"certificate": string(issuedCertPEM),
+	}
+	if issuedKeyPEM != nil {
+		resp["private_key"] = string(issuedKeyPEM)
+	}
+	jsonResp(w, resp)
 }
 
 func (s *Server) handleListCerts(w http.ResponseWriter, r *http.Request) {
@@ -570,13 +573,13 @@ func (s *Server) handleRenewCert(w http.ResponseWriter, r *http.Request) {
 		issueOpts.OCSPURL = s.cfg.OCSPURL()
 	}
 
-	certPEM, _, err := loadedCA.IssueCert(issueOpts)
+	renewedCertPEM, renewedKeyPEM, err := loadedCA.IssueCert(issueOpts)
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	block, _ := pem.Decode(certPEM)
+	block, _ := pem.Decode(renewedCertPEM)
 	newCert, _ := x509.ParseCertificate(block.Bytes)
 	fingerprint := sha256.Sum256(newCert.RawSubjectPublicKeyInfo)
 
@@ -589,7 +592,7 @@ func (s *Server) handleRenewCert(w http.ResponseWriter, r *http.Request) {
 		Profile:              orig.Profile,
 		NotBefore:            newCert.NotBefore,
 		NotAfter:             newCert.NotAfter,
-		CertificatePEM:       string(certPEM),
+		CertificatePEM:       string(renewedCertPEM),
 		PublicKeyFingerprint: hex.EncodeToString(fingerprint[:]),
 		Status:               "active",
 		RenewedFromSerial:    orig.Serial,
@@ -599,20 +602,23 @@ func (s *Server) handleRenewCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Revoke old cert as superseded
 	_ = s.store.RevokeCert(storage.RevokeOpts{Serial: orig.Serial, Reason: "superseded", Actor: "api"})
 
 	_ = s.store.InsertAudit("api", "certificate.renewed", "certificate", fmt.Sprintf("%d", newID), map[string]any{
 		"old_serial": orig.Serial, "new_serial": fmt.Sprintf("%X", newCert.SerialNumber),
 	})
 
-	jsonResp(w, map[string]any{
+	resp := map[string]any{
 		"id":           newID,
 		"serial":       fmt.Sprintf("%X", newCert.SerialNumber),
 		"renewed_from": orig.Serial,
 		"expires":      newCert.NotAfter.Format(time.RFC3339),
-		"certificate":  string(certPEM),
-	})
+		"certificate":  string(renewedCertPEM),
+	}
+	if renewedKeyPEM != nil {
+		resp["private_key"] = string(renewedKeyPEM)
+	}
+	jsonResp(w, resp)
 }
 
 // handleCRLForCA returns CRL for a CA via /v1/ca/{id}/crl (PEM by default, DER with Accept header)
@@ -678,7 +684,7 @@ func (s *Server) generateCRL(caID int64) ([]byte, error) {
 
 	var crlEntries []ca.CRLEntry
 	for _, e := range entries {
-		crlEntries = append(crlEntries, ca.CRLEntry{SerialHex: e.Serial, RevokedAt: e.RevokedAt})
+		crlEntries = append(crlEntries, ca.CRLEntry{SerialHex: e.Serial, RevokedAt: e.RevokedAt, ReasonCode: e.ReasonCode})
 	}
 
 	validityHours := s.cfg.Revocation.CRLValidityHours
