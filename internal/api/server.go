@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
-	"crypto/subtle"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -17,6 +16,7 @@ import (
 	"github.com/cyphera-labs/open-pki-server/internal/ca"
 	"github.com/cyphera-labs/open-pki-server/internal/config"
 	"github.com/cyphera-labs/open-pki-server/internal/dashboard"
+	"github.com/cyphera-labs/open-pki-server/internal/dashauth"
 	pkiocsp "github.com/cyphera-labs/open-pki-server/internal/ocsp"
 	"github.com/cyphera-labs/open-pki-server/internal/profile"
 	"github.com/cyphera-labs/open-pki-server/internal/storage"
@@ -28,15 +28,20 @@ type Server struct {
 	profiles map[string]*profile.Profile
 	cfg      *config.Config
 	mux      *http.ServeMux
+	dashAuth *dashauth.DashAuth
 }
 
 // NewServer creates a new API server.
 func NewServer(store *storage.Store, profiles map[string]*profile.Profile, cfg *config.Config) *Server {
+	// PKI server uses HTTP (no TLS yet), so Secure flag = false on cookies
+	da := dashauth.New(cfg.Server.APIKey, false)
+
 	s := &Server{
 		store:    store,
 		profiles: profiles,
 		cfg:      cfg,
 		mux:      http.NewServeMux(),
+		dashAuth: da,
 	}
 	s.routes()
 	return s
@@ -48,32 +53,30 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) routes() {
-	// Dashboard — public when no API key, auth-protected when key is set
-	if s.cfg.Server.APIKey != "" {
-		s.mux.Handle("/", s.auth(func(w http.ResponseWriter, r *http.Request) {
-			dashboard.Handler().ServeHTTP(w, r)
-		}))
-	} else {
-		s.mux.Handle("/", dashboard.Handler())
-	}
+	// Auth endpoints (public — handles login/logout/status)
+	s.dashAuth.RegisterRoutes(s.mux)
 
+	// Dashboard static files (public — JS handles login screen)
+	s.mux.Handle("/", dashboard.Handler())
+
+	// Public endpoints
 	s.mux.HandleFunc("GET /v1/health", s.handleHealth)
 
 	// CA
-	s.mux.HandleFunc("POST /v1/ca/root", s.auth(s.handleCreateRootCA))
-	s.mux.HandleFunc("GET /v1/ca", s.auth(s.handleListCAs))
-	s.mux.HandleFunc("GET /v1/ca/bundle", s.auth(s.handleCABundle))
-	s.mux.HandleFunc("GET /v1/ca/{id}", s.auth(s.handleGetCA))
-	s.mux.HandleFunc("GET /v1/ca/{id}/crl", s.auth(s.handleCRLForCA))
+	s.mux.HandleFunc("POST /v1/ca/root", s.dashAuth.RequireAPIAuth(s.handleCreateRootCA))
+	s.mux.HandleFunc("GET /v1/ca", s.dashAuth.RequireAPIAuth(s.handleListCAs))
+	s.mux.HandleFunc("GET /v1/ca/bundle", s.dashAuth.RequireAPIAuth(s.handleCABundle))
+	s.mux.HandleFunc("GET /v1/ca/{id}", s.dashAuth.RequireAPIAuth(s.handleGetCA))
+	s.mux.HandleFunc("GET /v1/ca/{id}/crl", s.dashAuth.RequireAPIAuth(s.handleCRLForCA))
 
 	// Certificates
-	s.mux.HandleFunc("POST /v1/certificates/issue", s.auth(s.handleIssueCert))
-	s.mux.HandleFunc("POST /v1/certificates/issue-csr", s.auth(s.handleIssueFromCSR))
-	s.mux.HandleFunc("POST /v1/certificates/renew", s.auth(s.handleRenewCert))
-	s.mux.HandleFunc("GET /v1/certificates", s.auth(s.handleListCerts))
-	s.mux.HandleFunc("GET /v1/certificates/expiring", s.auth(s.handleListExpiring))
-	s.mux.HandleFunc("GET /v1/certificates/{serial}", s.auth(s.handleGetCert))
-	s.mux.HandleFunc("POST /v1/certificates/{serial}/revoke", s.auth(s.handleRevokeCert))
+	s.mux.HandleFunc("POST /v1/certificates/issue", s.dashAuth.RequireAPIAuth(s.handleIssueCert))
+	s.mux.HandleFunc("POST /v1/certificates/issue-csr", s.dashAuth.RequireAPIAuth(s.handleIssueFromCSR))
+	s.mux.HandleFunc("POST /v1/certificates/renew", s.dashAuth.RequireAPIAuth(s.handleRenewCert))
+	s.mux.HandleFunc("GET /v1/certificates", s.dashAuth.RequireAPIAuth(s.handleListCerts))
+	s.mux.HandleFunc("GET /v1/certificates/expiring", s.dashAuth.RequireAPIAuth(s.handleListExpiring))
+	s.mux.HandleFunc("GET /v1/certificates/{serial}", s.dashAuth.RequireAPIAuth(s.handleGetCert))
+	s.mux.HandleFunc("POST /v1/certificates/{serial}/revoke", s.dashAuth.RequireAPIAuth(s.handleRevokeCert))
 
 	// CRL — public (no auth), DER format
 	s.mux.HandleFunc("GET /crl/", s.handlePublicCRL)
@@ -82,28 +85,17 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /ocsp", s.handleOCSP)
 
 	// Inventory
-	s.mux.HandleFunc("GET /v1/inventory", s.auth(s.handleInventory))
+	s.mux.HandleFunc("GET /v1/inventory", s.dashAuth.RequireAPIAuth(s.handleInventory))
 
 	// Audit
-	s.mux.HandleFunc("GET /v1/audit", s.auth(s.handleAudit))
+	s.mux.HandleFunc("GET /v1/audit", s.dashAuth.RequireAPIAuth(s.handleAudit))
 
 	// Stats + Metrics
-	s.mux.HandleFunc("GET /v1/stats", s.auth(s.handleStats))
+	s.mux.HandleFunc("GET /v1/stats", s.dashAuth.RequireAPIAuth(s.handleStats))
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 }
 
-func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if s.cfg.Server.APIKey != "" {
-			token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.Server.APIKey)) != 1 {
-				jsonError(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-		}
-		next(w, r)
-	}
-}
+// auth() replaced by dashauth.RequireAPIAuth — session cookie + Bearer token
 
 // --- Handlers ---
 

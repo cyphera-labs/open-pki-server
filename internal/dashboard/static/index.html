@@ -98,7 +98,19 @@ tr:hover td { background: var(--surface2); }
 </style>
 </head>
 <body>
-<div class="shell">
+
+<!-- Login screen -->
+<div id="login-screen" style="display:flex;align-items:center;justify-content:center;min-height:100vh;background:var(--bg)">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:32px;width:340px;text-align:center">
+    <h1 style="font-size:18px;margin-bottom:4px">Open PKI Server</h1>
+    <p style="color:var(--text2);font-size:12px;margin-bottom:24px">Cyphera Labs</p>
+    <input id="login-key" type="password" placeholder="API key" style="width:100%;padding:10px 14px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px;margin-bottom:12px">
+    <button onclick="doLogin()" style="width:100%;padding:10px;background:var(--accent);color:white;border:none;border-radius:6px;font-size:14px;cursor:pointer;font-weight:500">Sign In</button>
+    <p id="login-error" style="color:var(--red);font-size:12px;margin-top:12px;display:none">Invalid API key</p>
+  </div>
+</div>
+
+<div class="shell" id="app-shell" style="display:none">
   <div class="sidebar">
     <div class="logo">
       <h1>Open PKI</h1>
@@ -166,17 +178,74 @@ tr:hover td { background: var(--surface2); }
 </div>
 
 <script>
-const API = '';
+// --- Auth (cookie-based session via /auth/* endpoints) ---
 
 async function api(path) {
-  const r = await fetch(API + path);
+  const r = await fetch(path, {credentials: 'same-origin'});
+  if (r.status === 401) { showLoginScreen('Session expired'); return null; }
   return r.json();
 }
 
 async function apiPost(path, body) {
-  const r = await fetch(API + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await fetch(path, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    credentials: 'same-origin',
+    body: JSON.stringify(body),
+  });
+  if (r.status === 401) { showLoginScreen('Session expired'); return null; }
   return r.json();
 }
+
+function showLoginScreen(msg) {
+  document.getElementById('app-shell').style.display = 'none';
+  document.getElementById('dev-banner')?.remove();
+  document.getElementById('login-screen').style.display = 'flex';
+  if (msg) {
+    const err = document.getElementById('login-error');
+    err.textContent = msg;
+    err.style.display = 'block';
+  }
+}
+
+function showApp(devMode) {
+  document.getElementById('login-screen').style.display = 'none';
+  document.getElementById('app-shell').style.display = 'flex';
+  if (devMode && !document.getElementById('dev-banner')) {
+    const banner = document.createElement('div');
+    banner.id = 'dev-banner';
+    banner.style.cssText = 'background:var(--yellow);color:#000;text-align:center;padding:4px;font-size:12px;font-weight:600;position:fixed;top:0;left:0;right:0;z-index:999';
+    banner.textContent = 'DEV MODE — no authentication';
+    document.body.prepend(banner);
+    document.querySelector('.shell').style.marginTop = '28px';
+  }
+  loadOverview();
+}
+
+async function doLogin() {
+  const key = document.getElementById('login-key').value;
+  if (!key) return;
+  document.getElementById('login-error').style.display = 'none';
+  const r = await fetch('/auth/login', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    credentials: 'same-origin',
+    body: JSON.stringify({api_key: key}),
+  });
+  if (r.ok) {
+    document.getElementById('login-key').value = '';
+    showApp(false);
+  } else {
+    const data = await r.json().catch(() => ({}));
+    const err = document.getElementById('login-error');
+    err.textContent = data.error || 'Invalid API key';
+    err.style.display = 'block';
+  }
+}
+
+document.getElementById('login-key').addEventListener('keydown', e => {
+  if (e.key === 'Enter') doLogin();
+});
 
 // Navigation
 document.querySelectorAll('[data-page]').forEach(link => {
@@ -329,8 +398,21 @@ async function loadAudit() {
   `).join('') || '<div class="loading">No audit events</div>';
 }
 
-// Init
-loadOverview();
+// Init — check auth status on load
+(async function checkAuth() {
+  try {
+    const r = await fetch('/auth/status', {credentials: 'same-origin'});
+    const data = await r.json();
+    if (data.dev_mode) {
+      showApp(true);
+    } else if (data.authenticated) {
+      showApp(false);
+    }
+    // else: login screen is already visible
+  } catch (e) {
+    // Server unreachable
+  }
+})();
 </script>
 </body>
 </html>
