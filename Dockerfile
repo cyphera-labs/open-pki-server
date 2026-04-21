@@ -17,4 +17,4 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD wget -qO- http://localhost:8300/v1/health || exit 1
 
 ENTRYPOINT ["open-pki"]
-CMD ["serve", "--help"]
+CMD ["serve", "--dev", "--addr", ":8300", "--db", "/data/open-pki.db"]

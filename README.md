@@ -29,7 +29,13 @@ go install github.com/cyphera-labs/open-pki-server/cmd/open-pki@latest
 Or use Docker:
 
 ```bash
-docker run -d -p 8300:8300 -v pki-data:/data ghcr.io/cyphera-labs/open-pki-server
+# Dev mode (localhost only, no auth, for local testing)
+docker run -d -p 127.0.0.1:8300:8300 -v pki-data:/data ghcr.io/cyphera-labs/open-pki-server
+
+# Authenticated mode
+docker run -d -p 127.0.0.1:8300:8300 -v pki-data:/data \
+  ghcr.io/cyphera-labs/open-pki-server \
+  serve --api-key "$PKI_API_KEY" --db /data/open-pki.db --addr :8300
 ```
 
 ## Quick Start

@@ -547,6 +547,8 @@ func serveCmd() *cobra.Command {
 		apiKey  string
 		baseURL string
 		devMode bool
+		tlsCert string
+		tlsKey  string
 	)
 
 	cmd := &cobra.Command{
@@ -576,8 +578,10 @@ func serveCmd() *cobra.Command {
 				cfg.Server.PublicBaseURL = baseURL
 			}
 
+			useTLS := tlsCert != "" && tlsKey != ""
+
 			profiles := profile.Defaults()
-			srv := api.NewServer(store, profiles, cfg)
+			srv := api.NewServer(store, profiles, cfg, useTLS)
 
 			log.Printf("Cyphera Open PKI Server listening on %s", addr)
 			log.Printf("  Database:  %s", dbPath)
@@ -588,6 +592,13 @@ func serveCmd() *cobra.Command {
 			} else {
 				log.Printf("  API key:   disabled (no auth)")
 			}
+			if useTLS {
+				log.Printf("  TLS:       enabled")
+				return http.ListenAndServeTLS(addr, tlsCert, tlsKey, srv.Handler())
+			}
+			if !devMode {
+				log.Println("  WARNING:   serving over plain HTTP — use --tls-cert and --tls-key for TLS")
+			}
 			return http.ListenAndServe(addr, srv.Handler())
 		},
 	}
@@ -595,6 +606,8 @@ func serveCmd() *cobra.Command {
 	cmd.Flags().StringVar(&addr, "addr", ":8300", "Listen address")
 	cmd.Flags().StringVar(&dbPath, "db", "./open-pki.db", "SQLite database path")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "API key for authentication")
+	cmd.Flags().StringVar(&tlsCert, "tls-cert", "", "TLS certificate PEM file")
+	cmd.Flags().StringVar(&tlsKey, "tls-key", "", "TLS private key PEM file")
 	cmd.Flags().StringVar(&baseURL, "base-url", "http://localhost:8300", "Public base URL for CRL/OCSP URLs embedded in certificates")
 	cmd.Flags().BoolVar(&devMode, "dev", false, "Dev mode — explicitly acknowledge no-auth for development")
 

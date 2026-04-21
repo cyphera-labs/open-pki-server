@@ -74,7 +74,8 @@ open-pki verify ./certs/localhost.pem --ca ./certs/ca.pem
 Start the REST API and dashboard:
 
 ```bash
-open-pki serve --db ./open-pki.db
+# Dev mode (localhost, no auth)
+open-pki serve --dev --db ./open-pki.db
 ```
 
 Dashboard at http://localhost:8300/.

@@ -31,10 +31,10 @@ type Server struct {
 	dashAuth *dashauth.DashAuth
 }
 
-// NewServer creates a new API server.
-func NewServer(store *storage.Store, profiles map[string]*profile.Profile, cfg *config.Config) *Server {
-	// PKI server uses HTTP (no TLS yet), so Secure flag = false on cookies
-	da := dashauth.New(cfg.Server.APIKey, false)
+// NewServer creates a new API server. tlsEnabled sets the Secure flag on session cookies.
+func NewServer(store *storage.Store, profiles map[string]*profile.Profile, cfg *config.Config, tlsEnabled ...bool) *Server {
+	tls := len(tlsEnabled) > 0 && tlsEnabled[0]
+	da := dashauth.New(cfg.Server.APIKey, tls)
 
 	s := &Server{
 		store:    store,
