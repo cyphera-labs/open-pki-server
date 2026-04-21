@@ -1,8 +1,8 @@
 # Cyphera Open PKI Server
 
-> **Alpha** — this project is under active development. APIs may change. Not yet recommended for production use with sensitive data.
+> **Alpha** — under active development. APIs may change.
 
-Internal certificate authority for developers. Create CAs, issue certificates, manage revocation, and run mTLS — without fighting OpenSSL or depending on heavyweight enterprise platforms.
+Open-source certificate authority and PKI lifecycle server for developers. Create CAs, issue certificates, manage revocation, and run mTLS — without fighting OpenSSL or depending on heavyweight enterprise platforms.
 
 Works standalone or paired with [Cyphera Open KMIP Server](https://github.com/cyphera-labs/open-kmip-server) for end-to-end key management + certificate lifecycle.
 
