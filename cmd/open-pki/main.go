@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/cyphera-labs/open-pki-server/internal/api"
@@ -25,8 +26,10 @@ func main() {
 
 	root.AddCommand(
 		initCACmd(),
+		initIntermediateCmd(),
 		issueServerCertCmd(),
 		issueClientCertCmd(),
+		issueFromCSRCmd(),
 		inspectCmd(),
 		verifyCmd(),
 		bundleCmd(),
@@ -241,6 +244,124 @@ func bundleCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVarP(&output, "output", "o", "bundle.pem", "Output file")
+	return cmd
+}
+
+func initIntermediateCmd() *cobra.Command {
+	var (
+		name       string
+		algorithm  string
+		validity   int
+		outDir     string
+		caCertPath string
+		caKeyPath  string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "init-intermediate",
+		Short: "Create an intermediate CA signed by a parent CA",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			parentCA, err := ca.LoadCA(caCertPath, caKeyPath)
+			if err != nil {
+				return fmt.Errorf("load parent CA: %w", err)
+			}
+
+			result, err := parentCA.InitIntermediateCA(ca.InitIntermediateCAOptions{
+				Name:         name,
+				Algorithm:    algorithm,
+				ValidityDays: validity,
+				OutputDir:    outDir,
+			})
+			if err != nil {
+				return err
+			}
+
+			fmt.Printf("Intermediate CA created: %s\n", result.Certificate.Subject.CommonName)
+			fmt.Printf("  Issuer:   %s\n", result.Certificate.Issuer.CommonName)
+			fmt.Printf("  Serial:   %X\n", result.Certificate.SerialNumber)
+			fmt.Printf("  Expires:  %s\n", result.Certificate.NotAfter.UTC().Format("2006-01-02"))
+			if outDir != "" {
+				fmt.Printf("  Files:    %s/%s.pem, %s/%s-key.pem\n", outDir, name, outDir, name)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&name, "name", "intermediate-ca", "Intermediate CA common name")
+	cmd.Flags().StringVar(&algorithm, "algorithm", "ed25519", "Key algorithm")
+	cmd.Flags().IntVar(&validity, "validity-days", 1825, "Validity in days (default 5 years)")
+	cmd.Flags().StringVar(&outDir, "out", ".", "Output directory")
+	cmd.Flags().StringVar(&caCertPath, "ca-cert", "ca.pem", "Parent CA certificate path")
+	cmd.Flags().StringVar(&caKeyPath, "ca-key", "ca-key.pem", "Parent CA key path")
+
+	return cmd
+}
+
+func issueFromCSRCmd() *cobra.Command {
+	var (
+		csrPath    string
+		profileName string
+		outDir     string
+		caCertPath string
+		caKeyPath  string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "issue",
+		Short: "Issue a certificate from a CSR",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			csrPEM, err := os.ReadFile(csrPath)
+			if err != nil {
+				return fmt.Errorf("read CSR: %w", err)
+			}
+
+			profiles := profile.Defaults()
+			prof, ok := profiles[profileName]
+			if !ok {
+				return fmt.Errorf("unknown profile %q (available: %s)", profileName, availableProfiles(profiles))
+			}
+
+			loadedCA, err := ca.LoadCA(caCertPath, caKeyPath)
+			if err != nil {
+				return fmt.Errorf("load CA: %w", err)
+			}
+
+			certPEM, err := loadedCA.IssueFromCSRPEM(csrPEM, prof, "", "")
+			if err != nil {
+				return err
+			}
+
+			info, _ := cert.InspectPEM(certPEM)
+			cn := "cert"
+			if info != nil {
+				cn = info.Subject
+			}
+
+			if outDir != "" {
+				outPath := filepath.Join(outDir, "issued.pem")
+				if err := os.MkdirAll(outDir, 0700); err != nil {
+					return err
+				}
+				if err := os.WriteFile(outPath, certPEM, 0644); err != nil {
+					return err
+				}
+				fmt.Printf("Certificate issued from CSR: %s\n", cn)
+				fmt.Printf("  Profile:  %s\n", profileName)
+				fmt.Printf("  File:     %s\n", outPath)
+			} else {
+				os.Stdout.Write(certPEM)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&csrPath, "csr", "", "Path to CSR PEM file (required)")
+	cmd.Flags().StringVar(&profileName, "profile", "server", "Certificate profile")
+	cmd.Flags().StringVar(&outDir, "out", "", "Output directory (omit for stdout)")
+	cmd.Flags().StringVar(&caCertPath, "ca-cert", "ca.pem", "CA certificate path")
+	cmd.Flags().StringVar(&caKeyPath, "ca-key", "ca-key.pem", "CA key path")
+	_ = cmd.MarkFlagRequired("csr")
+
 	return cmd
 }
 

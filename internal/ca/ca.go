@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -35,10 +36,10 @@ type InitRootCAOptions struct {
 	OutputDir    string
 }
 
-// InitRootCA creates a self-signed root CA.
+// InitRootCA creates a self-signed root CA with proper X.509 extensions.
 func InitRootCA(opts InitRootCAOptions) (*CA, error) {
 	if opts.ValidityDays <= 0 {
-		opts.ValidityDays = 3650 // 10 years
+		opts.ValidityDays = 3650
 	}
 	if opts.Algorithm == "" {
 		opts.Algorithm = "ed25519"
@@ -54,6 +55,13 @@ func InitRootCA(opts InitRootCAOptions) (*CA, error) {
 		return nil, fmt.Errorf("generate serial: %w", err)
 	}
 
+	// Subject Key Identifier = SHA-256 of public key
+	pubDER, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		return nil, fmt.Errorf("marshal public key: %w", err)
+	}
+	ski := sha256.Sum256(pubDER)
+
 	now := time.Now().UTC()
 	template := &x509.Certificate{
 		SerialNumber: serial,
@@ -68,6 +76,7 @@ func InitRootCA(opts InitRootCAOptions) (*CA, error) {
 		IsCA:                  true,
 		MaxPathLen:            1,
 		MaxPathLenZero:        false,
+		SubjectKeyId:          ski[:20], // Use first 20 bytes per RFC 5280
 	}
 
 	certDER, err := x509.CreateCertificate(rand.Reader, template, template, pub, priv)
@@ -92,12 +101,84 @@ func InitRootCA(opts InitRootCAOptions) (*CA, error) {
 		}
 	}
 
-	return &CA{
-		Certificate: cert,
-		PrivateKey:  priv,
-		CertPEM:     certPEM,
-		KeyPEM:      keyPEM,
-	}, nil
+	return &CA{Certificate: cert, PrivateKey: priv, CertPEM: certPEM, KeyPEM: keyPEM}, nil
+}
+
+// InitIntermediateCAOptions configures intermediate CA creation.
+type InitIntermediateCAOptions struct {
+	Name         string
+	Algorithm    string
+	ValidityDays int
+	OutputDir    string
+}
+
+// InitIntermediateCA creates an intermediate CA signed by this root/parent CA.
+func (parent *CA) InitIntermediateCA(opts InitIntermediateCAOptions) (*CA, error) {
+	if opts.ValidityDays <= 0 {
+		opts.ValidityDays = 1825 // 5 years
+	}
+	if opts.Algorithm == "" {
+		opts.Algorithm = "ed25519"
+	}
+
+	priv, pub, err := generateKeyPair(opts.Algorithm)
+	if err != nil {
+		return nil, fmt.Errorf("generate key: %w", err)
+	}
+
+	serial, err := randomSerial()
+	if err != nil {
+		return nil, fmt.Errorf("generate serial: %w", err)
+	}
+
+	pubDER, _ := x509.MarshalPKIXPublicKey(pub)
+	ski := sha256.Sum256(pubDER)
+
+	now := time.Now().UTC()
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			CommonName:   opts.Name,
+			Organization: []string{"Cyphera Open PKI"},
+		},
+		NotBefore:             now,
+		NotAfter:              now.Add(time.Duration(opts.ValidityDays) * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		MaxPathLen:            0,
+		MaxPathLenZero:        true,
+		SubjectKeyId:          ski[:20],
+		AuthorityKeyId:        parent.Certificate.SubjectKeyId,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, parent.Certificate, pub, parent.PrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("create certificate: %w", err)
+	}
+
+	cert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		return nil, fmt.Errorf("parse certificate: %w", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyPEM, err := marshalPrivateKey(priv)
+	if err != nil {
+		return nil, fmt.Errorf("marshal key: %w", err)
+	}
+
+	if opts.OutputDir != "" {
+		name := opts.Name
+		if name == "" {
+			name = "intermediate"
+		}
+		if err := writeFiles(opts.OutputDir, name, certPEM, keyPEM); err != nil {
+			return nil, err
+		}
+	}
+
+	return &CA{Certificate: cert, PrivateKey: priv, CertPEM: certPEM, KeyPEM: keyPEM}, nil
 }
 
 // IssueCertOptions configures certificate issuance.
@@ -108,27 +189,52 @@ type IssueCertOptions struct {
 	Profile    *profile.Profile
 	OutputDir  string
 	OutputName string
-	CRLURL     string // CRL Distribution Point URL to embed in cert
-	OCSPURL    string // OCSP responder URL to embed in cert
+	CRLURL     string
+	OCSPURL    string
+	CSR        *x509.CertificateRequest // If set, issue from CSR instead of generating keypair
 }
 
 // IssueCert creates a certificate signed by this CA.
-func (ca *CA) IssueCert(opts IssueCertOptions) (certPEM, keyPEM []byte, err error) {
+// If opts.CSR is set, the public key comes from the CSR. Otherwise a new keypair is generated.
+func (issuer *CA) IssueCert(opts IssueCertOptions) (certPEM, keyPEM []byte, err error) {
 	if opts.Profile == nil {
 		return nil, nil, fmt.Errorf("profile is required")
 	}
 
-	// Validate SANs and subject against profile
+	var pub crypto.PublicKey
+	var priv crypto.Signer
+
+	if opts.CSR != nil {
+		// CSR-based issuance: validate CSR signature
+		if err := opts.CSR.CheckSignature(); err != nil {
+			return nil, nil, fmt.Errorf("invalid CSR signature: %w", err)
+		}
+
+		// Extract subject from CSR but validate against profile
+		if opts.CommonName == "" {
+			opts.CommonName = opts.CSR.Subject.CommonName
+		}
+		if len(opts.DNSNames) == 0 {
+			opts.DNSNames = opts.CSR.DNSNames
+		}
+		if len(opts.IPs) == 0 {
+			opts.IPs = opts.CSR.IPAddresses
+		}
+		pub = opts.CSR.PublicKey
+	} else {
+		// Server-generated keypair
+		priv, pub, err = generateKeyPair("ed25519")
+		if err != nil {
+			return nil, nil, fmt.Errorf("generate key: %w", err)
+		}
+	}
+
+	// Validate SANs and subject against profile — NEVER blindly sign
 	if err := opts.Profile.ValidateSANs(opts.DNSNames, opts.IPs); err != nil {
 		return nil, nil, err
 	}
 	if err := opts.Profile.ValidateSubject(opts.CommonName); err != nil {
 		return nil, nil, err
-	}
-
-	priv, pub, err := generateKeyPair("ed25519")
-	if err != nil {
-		return nil, nil, fmt.Errorf("generate key: %w", err)
 	}
 
 	serial, err := randomSerial()
@@ -138,19 +244,24 @@ func (ca *CA) IssueCert(opts IssueCertOptions) (certPEM, keyPEM []byte, err erro
 
 	notBefore, notAfter := opts.Profile.Validity()
 
+	// Subject Key Identifier for the end-entity cert
+	pubDER, _ := x509.MarshalPKIXPublicKey(pub)
+	ski := sha256.Sum256(pubDER)
+
 	template := &x509.Certificate{
 		SerialNumber: serial,
 		Subject: pkix.Name{
 			CommonName: opts.CommonName,
 		},
-		NotBefore:    notBefore,
-		NotAfter:     notAfter,
-		ExtKeyUsage:  opts.Profile.KeyUsages(),
-		DNSNames:     opts.DNSNames,
-		IPAddresses:  opts.IPs,
+		NotBefore:      notBefore,
+		NotAfter:       notAfter,
+		ExtKeyUsage:    opts.Profile.KeyUsages(),
+		DNSNames:       opts.DNSNames,
+		IPAddresses:    opts.IPs,
+		SubjectKeyId:   ski[:20],
+		AuthorityKeyId: issuer.Certificate.SubjectKeyId,
 	}
 
-	// Set KeyUsage based on profile type
 	switch opts.Profile.Type {
 	case "server":
 		template.KeyUsage = x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment
@@ -160,25 +271,26 @@ func (ca *CA) IssueCert(opts IssueCertOptions) (certPEM, keyPEM []byte, err erro
 		template.KeyUsage = x509.KeyUsageDigitalSignature
 	}
 
-	// CRL Distribution Point
 	if opts.CRLURL != "" {
 		template.CRLDistributionPoints = []string{opts.CRLURL}
 	}
-
-	// Authority Information Access — OCSP
 	if opts.OCSPURL != "" {
 		template.OCSPServer = []string{opts.OCSPURL}
 	}
 
-	certDER, err := x509.CreateCertificate(rand.Reader, template, ca.Certificate, pub, ca.PrivateKey)
+	certDER, err := x509.CreateCertificate(rand.Reader, template, issuer.Certificate, pub, issuer.PrivateKey)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create certificate: %w", err)
 	}
 
 	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-	keyPEM, err = marshalPrivateKey(priv)
-	if err != nil {
-		return nil, nil, fmt.Errorf("marshal key: %w", err)
+
+	// Only marshal private key if we generated it (not CSR-based)
+	if priv != nil {
+		keyPEM, err = marshalPrivateKey(priv)
+		if err != nil {
+			return nil, nil, fmt.Errorf("marshal key: %w", err)
+		}
 	}
 
 	if opts.OutputDir != "" {
@@ -194,7 +306,27 @@ func (ca *CA) IssueCert(opts IssueCertOptions) (certPEM, keyPEM []byte, err erro
 	return certPEM, keyPEM, nil
 }
 
-// LoadCAFromPEM loads a CA from PEM byte slices (for in-memory/database use).
+// IssueFromCSRPEM parses a PEM-encoded CSR and issues a certificate.
+func (issuer *CA) IssueFromCSRPEM(csrPEM []byte, prof *profile.Profile, crlURL, ocspURL string) (certPEM []byte, err error) {
+	block, _ := pem.Decode(csrPEM)
+	if block == nil {
+		return nil, fmt.Errorf("no PEM block found in CSR")
+	}
+	csr, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse CSR: %w", err)
+	}
+
+	certPEM, _, err = issuer.IssueCert(IssueCertOptions{
+		CSR:     csr,
+		Profile: prof,
+		CRLURL:  crlURL,
+		OCSPURL: ocspURL,
+	})
+	return certPEM, err
+}
+
+// LoadCAFromPEM loads a CA from PEM byte slices.
 func LoadCAFromPEM(certPEM, keyPEM []byte) (*CA, error) {
 	certBlock, _ := pem.Decode(certPEM)
 	if certBlock == nil {
@@ -214,12 +346,7 @@ func LoadCAFromPEM(certPEM, keyPEM []byte) (*CA, error) {
 		return nil, fmt.Errorf("parse key: %w", err)
 	}
 
-	return &CA{
-		Certificate: cert,
-		PrivateKey:  key,
-		CertPEM:     certPEM,
-		KeyPEM:      keyPEM,
-	}, nil
+	return &CA{Certificate: cert, PrivateKey: key, CertPEM: certPEM, KeyPEM: keyPEM}, nil
 }
 
 // LoadCA reads a CA certificate and key from PEM files.
@@ -232,31 +359,7 @@ func LoadCA(certPath, keyPath string) (*CA, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read key: %w", err)
 	}
-
-	certBlock, _ := pem.Decode(certPEM)
-	if certBlock == nil {
-		return nil, fmt.Errorf("no PEM block in %s", certPath)
-	}
-	cert, err := x509.ParseCertificate(certBlock.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("parse cert: %w", err)
-	}
-
-	keyBlock, _ := pem.Decode(keyPEM)
-	if keyBlock == nil {
-		return nil, fmt.Errorf("no PEM block in %s", keyPath)
-	}
-	key, err := parsePrivateKey(keyBlock.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("parse key: %w", err)
-	}
-
-	return &CA{
-		Certificate: cert,
-		PrivateKey:  key,
-		CertPEM:     certPEM,
-		KeyPEM:      keyPEM,
-	}, nil
+	return LoadCAFromPEM(certPEM, keyPEM)
 }
 
 // CRLEntry represents a single revoked certificate for CRL generation.
@@ -266,7 +369,7 @@ type CRLEntry struct {
 }
 
 // GenerateCRL creates a signed CRL from revoked entries.
-func GenerateCRL(issuer *CA, entries []CRLEntry, validityHours int) ([]byte, error) {
+func GenerateCRL(issuerCA *CA, entries []CRLEntry, validityHours int) ([]byte, error) {
 	if validityHours <= 0 {
 		validityHours = 24
 	}
@@ -289,7 +392,7 @@ func GenerateCRL(issuer *CA, entries []CRLEntry, validityHours int) ([]byte, err
 		RevokedCertificateEntries: revokedCerts,
 	}
 
-	return x509.CreateRevocationList(nil, template, issuer.Certificate, issuer.PrivateKey)
+	return x509.CreateRevocationList(nil, template, issuerCA.Certificate, issuerCA.PrivateKey)
 }
 
 // EncodeCRLPEM wraps DER-encoded CRL bytes in PEM.
@@ -303,10 +406,7 @@ func generateKeyPair(algorithm string) (crypto.Signer, crypto.PublicKey, error) 
 	switch algorithm {
 	case "ed25519":
 		pub, priv, err := ed25519.GenerateKey(rand.Reader)
-		if err != nil {
-			return nil, nil, err
-		}
-		return priv, pub, nil
+		return priv, pub, err
 	case "ecdsa-p256":
 		priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
@@ -320,7 +420,7 @@ func generateKeyPair(algorithm string) (crypto.Signer, crypto.PublicKey, error) 
 		}
 		return priv, &priv.PublicKey, nil
 	default:
-		return nil, nil, fmt.Errorf("unsupported algorithm: %s", algorithm)
+		return nil, nil, fmt.Errorf("unsupported algorithm: %s (supported: ed25519, ecdsa-p256, ecdsa-p384)", algorithm)
 	}
 }
 
@@ -339,7 +439,6 @@ func marshalPrivateKey(key crypto.Signer) ([]byte, error) {
 func parsePrivateKey(der []byte) (crypto.Signer, error) {
 	key, err := x509.ParsePKCS8PrivateKey(der)
 	if err != nil {
-		// Try PKCS1 and EC as fallbacks
 		if k, err2 := x509.ParseECPrivateKey(der); err2 == nil {
 			return k, nil
 		}
@@ -357,12 +456,14 @@ func writeFiles(dir, name string, certPEM, keyPEM []byte) error {
 		return fmt.Errorf("create output dir: %w", err)
 	}
 	certPath := filepath.Join(dir, name+".pem")
-	keyPath := filepath.Join(dir, name+"-key.pem")
 	if err := os.WriteFile(certPath, certPEM, 0644); err != nil {
 		return fmt.Errorf("write cert: %w", err)
 	}
-	if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
-		return fmt.Errorf("write key: %w", err)
+	if keyPEM != nil {
+		keyPath := filepath.Join(dir, name+"-key.pem")
+		if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
+			return fmt.Errorf("write key: %w", err)
+		}
 	}
 	return nil
 }

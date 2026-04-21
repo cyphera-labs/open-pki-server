@@ -60,6 +60,7 @@ func (s *Server) routes() {
 
 	// Certificates
 	s.mux.HandleFunc("POST /v1/certificates/issue", s.auth(s.handleIssueCert))
+	s.mux.HandleFunc("POST /v1/certificates/issue-csr", s.auth(s.handleIssueFromCSR))
 	s.mux.HandleFunc("POST /v1/certificates/renew", s.auth(s.handleRenewCert))
 	s.mux.HandleFunc("GET /v1/certificates", s.auth(s.handleListCerts))
 	s.mux.HandleFunc("GET /v1/certificates/expiring", s.auth(s.handleListExpiring))
@@ -372,6 +373,104 @@ func (s *Server) handleRevokeCert(w http.ResponseWriter, r *http.Request) {
 	})
 
 	jsonResp(w, map[string]string{"status": "revoked", "serial": serial, "reason": req.Reason})
+}
+
+func (s *Server) handleIssueFromCSR(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		CAID    int64  `json:"ca_id"`
+		CSR     string `json:"csr"`
+		Profile string `json:"profile"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.CSR == "" {
+		jsonError(w, "csr is required", http.StatusBadRequest)
+		return
+	}
+	if req.Profile == "" {
+		req.Profile = "server"
+	}
+
+	prof, ok := s.profiles[req.Profile]
+	if !ok {
+		jsonError(w, fmt.Sprintf("unknown profile: %s", req.Profile), http.StatusBadRequest)
+		return
+	}
+
+	caRec, err := s.store.GetCA(req.CAID)
+	if err != nil {
+		jsonError(w, "CA not found", http.StatusNotFound)
+		return
+	}
+	keyPEM, err := s.store.GetKey("ca", caRec.ID)
+	if err != nil {
+		jsonError(w, "CA key not found", http.StatusInternalServerError)
+		return
+	}
+	loadedCA, err := ca.LoadCAFromPEM([]byte(caRec.CertificatePEM), []byte(keyPEM))
+	if err != nil {
+		jsonError(w, fmt.Sprintf("load CA: %s", err), http.StatusInternalServerError)
+		return
+	}
+
+	var crlURL, ocspURL string
+	if s.cfg.Revocation.CRLEnabled && s.cfg.Revocation.IncludeCRLDistributionPoints {
+		crlURL = s.cfg.CRLURL(req.CAID)
+	}
+	if s.cfg.Revocation.OCSPEnabled && s.cfg.Revocation.IncludeOCSPURL {
+		ocspURL = s.cfg.OCSPURL()
+	}
+
+	certPEM, err := loadedCA.IssueFromCSRPEM([]byte(req.CSR), prof, crlURL, ocspURL)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	block, _ := pem.Decode(certPEM)
+	issuedCert, _ := x509.ParseCertificate(block.Bytes)
+	fingerprint := sha256.Sum256(issuedCert.RawSubjectPublicKeyInfo)
+
+	var sans []string
+	for _, dns := range issuedCert.DNSNames {
+		sans = append(sans, dns)
+	}
+	for _, ip := range issuedCert.IPAddresses {
+		sans = append(sans, ip.String())
+	}
+
+	certID, err := s.store.InsertCert(&storage.CertRecord{
+		CAID:                 caRec.ID,
+		Serial:               fmt.Sprintf("%X", issuedCert.SerialNumber),
+		Subject:              issuedCert.Subject.String(),
+		CommonName:           issuedCert.Subject.CommonName,
+		SANs:                 sans,
+		Profile:              req.Profile,
+		NotBefore:            issuedCert.NotBefore,
+		NotAfter:             issuedCert.NotAfter,
+		CertificatePEM:       string(certPEM),
+		PublicKeyFingerprint: hex.EncodeToString(fingerprint[:]),
+		Status:               "active",
+	})
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	_ = s.store.InsertAudit("api", "certificate.issued", "certificate", fmt.Sprintf("%d", certID), map[string]any{
+		"cn": issuedCert.Subject.CommonName, "profile": req.Profile, "source": "csr",
+	})
+
+	jsonResp(w, map[string]any{
+		"id":          certID,
+		"serial":      fmt.Sprintf("%X", issuedCert.SerialNumber),
+		"common_name": issuedCert.Subject.CommonName,
+		"profile":     req.Profile,
+		"expires":     issuedCert.NotAfter.Format(time.RFC3339),
+		"certificate": string(certPEM),
+	})
 }
 
 func (s *Server) handleRenewCert(w http.ResponseWriter, r *http.Request) {
