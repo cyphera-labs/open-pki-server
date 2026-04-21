@@ -1,6 +1,6 @@
 # Cyphera Open PKI Server
 
-> **Alpha** — under active development. APIs may change.
+> **Alpha software.** Not audited. Not production CA infrastructure. Intended for development, testing, homelabs, education, demos, and early feedback.
 
 Open-source certificate authority and PKI lifecycle server for developers. Create CAs, issue certificates, manage revocation, and run mTLS — without fighting OpenSSL or depending on heavyweight enterprise platforms.
 
