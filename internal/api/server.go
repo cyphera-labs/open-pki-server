@@ -16,6 +16,7 @@ import (
 	"github.com/cyphera-labs/open-pki-server/internal/ca"
 	"github.com/cyphera-labs/open-pki-server/internal/config"
 	"github.com/cyphera-labs/open-pki-server/internal/dashboard"
+	pkiocsp "github.com/cyphera-labs/open-pki-server/internal/ocsp"
 	"github.com/cyphera-labs/open-pki-server/internal/profile"
 	"github.com/cyphera-labs/open-pki-server/internal/storage"
 )
@@ -69,6 +70,12 @@ func (s *Server) routes() {
 
 	// CRL — public (no auth), DER format
 	s.mux.HandleFunc("GET /crl/", s.handlePublicCRL)
+
+	// OCSP — public (no auth)
+	s.mux.HandleFunc("POST /ocsp", s.handleOCSP)
+
+	// Inventory
+	s.mux.HandleFunc("GET /v1/inventory", s.auth(s.handleInventory))
 
 	// Audit
 	s.mux.HandleFunc("GET /v1/audit", s.auth(s.handleAudit))
@@ -658,6 +665,33 @@ func (s *Server) generateCRL(caID int64) ([]byte, error) {
 	return crlDER, nil
 }
 
+func (s *Server) handleOCSP(w http.ResponseWriter, r *http.Request) {
+	// For MVP: use the first CA. A production OCSP responder would match
+	// the issuer from the OCSP request against stored CAs.
+	cas, err := s.store.ListCAs()
+	if err != nil || len(cas) == 0 {
+		http.Error(w, "no CA available", http.StatusInternalServerError)
+		return
+	}
+	caRec := cas[0]
+	keyPEM, err := s.store.GetKey("ca", caRec.ID)
+	if err != nil {
+		http.Error(w, "CA key not found", http.StatusInternalServerError)
+		return
+	}
+	loadedCA, err := ca.LoadCAFromPEM([]byte(caRec.CertificatePEM), []byte(keyPEM))
+	if err != nil {
+		http.Error(w, "load CA failed", http.StatusInternalServerError)
+		return
+	}
+
+	responder := pkiocsp.NewResponder(s.store, s.cfg.Revocation.OCSPResponseValidityMinutes)
+	responder.Handle(&pkiocsp.CAContext{
+		Certificate: loadedCA.Certificate,
+		PrivateKey:  loadedCA.PrivateKey,
+	})(w, r)
+}
+
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	limit := 50
 	if l := r.URL.Query().Get("limit"); l != "" {
@@ -671,6 +705,68 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResp(w, events)
+}
+
+func (s *Server) handleInventory(w http.ResponseWriter, r *http.Request) {
+	cas, _ := s.store.ListCAs()
+	certs, _ := s.store.ListCerts()
+
+	var records []map[string]any
+
+	for _, c := range cas {
+		records = append(records, map[string]any{
+			"id":          fmt.Sprintf("ca:%s", c.Serial),
+			"type":        "certificate_authority",
+			"source":      "open-pki-server",
+			"name":        c.Name,
+			"status":      c.Status,
+			"created_at":  c.CreatedAt.Format(time.RFC3339),
+			"expires_at":  c.NotAfter.Format(time.RFC3339),
+			"fingerprint": c.Serial,
+			"metadata": map[string]any{
+				"ca_type": c.Type,
+				"subject": c.Subject,
+			},
+		})
+	}
+
+	for _, c := range certs {
+		rec := map[string]any{
+			"id":          fmt.Sprintf("cert:%s", c.Serial),
+			"type":        "certificate",
+			"source":      "open-pki-server",
+			"name":        c.CommonName,
+			"status":      c.Status,
+			"created_at":  c.CreatedAt.Format(time.RFC3339),
+			"expires_at":  c.NotAfter.Format(time.RFC3339),
+			"fingerprint": c.PublicKeyFingerprint,
+			"relationships": []map[string]string{
+				{"type": "issued_by", "target": fmt.Sprintf("ca:%d", c.CAID)},
+			},
+			"metadata": map[string]any{
+				"subject":      c.Subject,
+				"common_name":  c.CommonName,
+				"sans":         c.SANs,
+				"profile":      c.Profile,
+				"serial":       c.Serial,
+				"key_algorithm": "ed25519",
+			},
+		}
+		if c.RenewedFromSerial != "" {
+			rec["relationships"] = append(rec["relationships"].([]map[string]string),
+				map[string]string{"type": "renewed_from", "target": fmt.Sprintf("cert:%s", c.RenewedFromSerial)})
+		}
+		if c.Status == "revoked" {
+			rec["revoked_at"] = ""
+			if c.RevokedAt != nil {
+				rec["revoked_at"] = c.RevokedAt.Format(time.RFC3339)
+			}
+			rec["revocation_reason"] = c.RevocationReason
+		}
+		records = append(records, rec)
+	}
+
+	jsonResp(w, records)
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
