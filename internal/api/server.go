@@ -384,7 +384,10 @@ func (s *Server) handleRevokeCert(w http.ResponseWriter, r *http.Request) {
 		Comment string `json:"comment"`
 		Actor   string `json:"actor"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
 	if req.Reason == "" {
 		req.Reason = "unspecified"
 	}
@@ -501,13 +504,21 @@ func (s *Server) handleIssueFromCSR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = s.store.InsertAudit("api", "certificate.issued", "certificate", fmt.Sprintf("%d", certID), map[string]any{
+	// Register in asset graph (consistent with generated issuance)
+	certSerial := fmt.Sprintf("%X", issuedCert.SerialNumber)
+	certAssetID := fmt.Sprintf("cert:%s", certSerial)
+	caAssetID := fmt.Sprintf("ca:%s", caRec.Serial)
+	_ = s.store.RegisterAsset(certAssetID, "certificate", certSerial, issuedCert.Subject.CommonName, "active")
+	_ = s.store.SetMetadata(certAssetID, "profile", req.Profile)
+	_ = s.store.SetMetadata(certAssetID, "issuance_mode", "csr")
+	_ = s.store.AddRelationship(certAssetID, "issued_by", caAssetID, nil)
+	_ = s.store.EmitLifecycleEvent(certAssetID, "certificate.issued", "api", map[string]any{
 		"cn": issuedCert.Subject.CommonName, "profile": req.Profile, "source": "csr",
 	})
 
 	jsonResp(w, map[string]any{
 		"id":          certID,
-		"serial":      fmt.Sprintf("%X", issuedCert.SerialNumber),
+		"serial":      certSerial,
 		"common_name": issuedCert.Subject.CommonName,
 		"profile":     req.Profile,
 		"expires":     issuedCert.NotAfter.Format(time.RFC3339),
@@ -638,7 +649,7 @@ func (s *Server) handleCRLForCA(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/x-pem-file")
 	w.Write(crlPEM)
 
-	_ = s.store.InsertAudit("api", "crl.downloaded", "ca", fmt.Sprintf("%d", id), nil)
+	// CRL download audit intentionally omitted — public endpoint would spam events
 }
 
 // handlePublicCRL returns CRL in DER format at /crl/{id}.crl
@@ -696,9 +707,8 @@ func (s *Server) generateCRL(caID int64) ([]byte, error) {
 		return nil, fmt.Errorf("create CRL: %s", err)
 	}
 
-	_ = s.store.InsertAudit("system", "crl.generated", "ca", fmt.Sprintf("%d", caID), map[string]any{
-		"revoked_count": len(crlEntries),
-	})
+	// CRL generation audit intentionally omitted from dynamic generation —
+	// would fire on every CRL request. Audit revocation events instead.
 
 	return crlDER, nil
 }

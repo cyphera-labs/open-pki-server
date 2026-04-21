@@ -1,0 +1,10 @@
+*.db
+*.db-wal
+*.db-shm
+*.pem
+*.key
+*.p12
+.git
+.github
+.idea
+.vscode

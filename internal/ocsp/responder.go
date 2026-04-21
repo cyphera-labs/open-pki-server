@@ -4,6 +4,7 @@ import (
 	"crypto"
 	"crypto/sha1"
 	"crypto/x509"
+	"fmt"
 	"encoding/pem"
 	"io"
 	"net/http"
@@ -182,16 +183,8 @@ func (resp *Responder) matchIssuer(ocspReq *gocsp.Request) (*caKeyPair, error) {
 		return &caKeyPair{cert: caCert, key: signer}, nil
 	}
 
-	// Fallback: if no issuer key hash match, use first CA (backward compat)
-	caRec := cas[0]
-	block, _ := pem.Decode([]byte(caRec.CertificatePEM))
-	caCert, _ := x509.ParseCertificate(block.Bytes)
-	keyPEM, _ := resp.store.GetKey("ca", caRec.ID)
-	keyBlock, _ := pem.Decode([]byte(keyPEM))
-	key, _ := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
-	signer, _ := key.(crypto.Signer)
-
-	return &caKeyPair{cert: caCert, key: signer}, nil
+	// No issuer match found — return error instead of silently using wrong CA
+	return nil, fmt.Errorf("no CA matches OCSP request issuer key hash")
 }
 
 // getCAID returns the DB ID for a CA cert (by matching serial).
