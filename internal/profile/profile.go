@@ -81,6 +81,13 @@ func (p *Profile) ValidateSANs(dnsNames []string, ips []net.IP) error {
 			}
 		}
 	}
+	if len(p.AllowedIPs) > 0 {
+		for _, ip := range ips {
+			if !matchesAllowedIP(ip, p.AllowedIPs) {
+				return fmt.Errorf("IP %s not allowed by profile %q (allowed: %v)", ip, p.Name, p.AllowedIPs)
+			}
+		}
+	}
 	return nil
 }
 
@@ -100,6 +107,21 @@ func (p *Profile) ValidateSubject(cn string) error {
 func matchesDNSSuffix(name string, suffixes []string) bool {
 	for _, suffix := range suffixes {
 		if name == suffix || strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesAllowedIP(ip net.IP, allowed []string) bool {
+	for _, a := range allowed {
+		// Try exact match first
+		if ip.String() == a {
+			return true
+		}
+		// Try CIDR match
+		_, cidr, err := net.ParseCIDR(a)
+		if err == nil && cidr.Contains(ip) {
 			return true
 		}
 	}

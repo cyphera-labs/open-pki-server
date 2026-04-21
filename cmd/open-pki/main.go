@@ -554,11 +554,9 @@ func serveCmd() *cobra.Command {
 		Short: "Start the PKI server with REST API and dashboard",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !devMode && apiKey == "" {
-				log.Println("========================================")
-				log.Println("  WARNING: No API key configured.")
-				log.Println("  Dashboard and API are unauthenticated.")
-				log.Println("  Use --api-key for production or --dev for development.")
-				log.Println("========================================")
+				log.Fatal("FATAL: --api-key is required unless --dev is explicitly set.\n" +
+					"  Use --api-key <key> for authenticated mode.\n" +
+					"  Use --dev for local development (no auth).")
 			}
 			if devMode {
 				log.Println("========================================")

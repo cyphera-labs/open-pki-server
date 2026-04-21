@@ -1,6 +1,6 @@
 # Cyphera Open PKI Server
 
-> **Alpha software.** Not audited. Not production CA infrastructure. Intended for development, testing, homelabs, education, demos, and early feedback.
+> **Alpha software. Development and evaluation use only.** This release is not audited and is not suitable for production CA infrastructure. CA private keys are currently stored unwrapped in SQLite. Set an API key and do not expose the default configuration to untrusted networks.
 
 Open-source certificate authority and PKI lifecycle server for developers. Create CAs, issue certificates, manage revocation, and run mTLS — without fighting OpenSSL or depending on heavyweight enterprise platforms.
 
@@ -78,10 +78,11 @@ open-pki issue-client-cert \
   --cn demo-client \
   --out ./certs
 
-open-kmip-server \
+open-kmip \
   --cert ./certs/localhost.pem \
   --key ./certs/localhost-key.pem \
-  --ca ./certs/ca.pem
+  --ca ./certs/ca.pem \
+  --api-key my-secret
 ```
 
 ## CLI Reference

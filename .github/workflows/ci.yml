@@ -13,6 +13,7 @@ jobs:
           go-version: stable
       - run: go build -o open-pki ./cmd/open-pki/
       - run: go vet ./...
+      - run: go test ./... -race -count=1
 
   security:
     name: Security
@@ -29,3 +30,14 @@ jobs:
           languages: go
       - uses: github/codeql-action/autobuild@v3
       - uses: github/codeql-action/analyze@v3
+
+  govulncheck:
+    name: Vulnerability Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: govulncheck ./...
