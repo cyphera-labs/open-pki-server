@@ -542,16 +542,30 @@ func listCmd() *cobra.Command {
 
 func serveCmd() *cobra.Command {
 	var (
-		addr      string
-		dbPath    string
-		apiKey    string
-		baseURL   string
+		addr    string
+		dbPath  string
+		apiKey  string
+		baseURL string
+		devMode bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Start the PKI server with REST API and dashboard",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if !devMode && apiKey == "" {
+				log.Println("========================================")
+				log.Println("  WARNING: No API key configured.")
+				log.Println("  Dashboard and API are unauthenticated.")
+				log.Println("  Use --api-key for production or --dev for development.")
+				log.Println("========================================")
+			}
+			if devMode {
+				log.Println("========================================")
+				log.Println("  DEV MODE — NOT FOR PRODUCTION")
+				log.Println("========================================")
+			}
+
 			store, err := storage.Open(dbPath)
 			if err != nil {
 				return fmt.Errorf("open database: %w", err)
@@ -582,8 +596,9 @@ func serveCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&addr, "addr", ":8300", "Listen address")
 	cmd.Flags().StringVar(&dbPath, "db", "./open-pki.db", "SQLite database path")
-	cmd.Flags().StringVar(&apiKey, "api-key", "", "API key for authentication (optional)")
+	cmd.Flags().StringVar(&apiKey, "api-key", "", "API key for authentication")
 	cmd.Flags().StringVar(&baseURL, "base-url", "http://localhost:8300", "Public base URL for CRL/OCSP URLs embedded in certificates")
+	cmd.Flags().BoolVar(&devMode, "dev", false, "Dev mode — explicitly acknowledge no-auth for development")
 
 	return cmd
 }
