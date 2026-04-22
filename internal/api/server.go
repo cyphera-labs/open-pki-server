@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -47,9 +48,14 @@ func NewServer(store *storage.Store, profiles map[string]*profile.Profile, cfg *
 	return s
 }
 
-// Handler returns the HTTP handler.
+// Handler returns the HTTP handler with request body size limits.
 func (s *Server) Handler() http.Handler {
-	return s.mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
+		}
+		s.mux.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) routes() {
@@ -124,7 +130,7 @@ func (s *Server) handleCreateRootCA(w http.ResponseWriter, r *http.Request) {
 		ValidityDays: req.ValidityDays,
 	})
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, "operation failed", err)
 		return
 	}
 
@@ -140,7 +146,7 @@ func (s *Server) handleCreateRootCA(w http.ResponseWriter, r *http.Request) {
 		Status:         "active",
 	})
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, "operation failed", err)
 		return
 	}
 
@@ -164,7 +170,7 @@ func (s *Server) handleCreateRootCA(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListCAs(w http.ResponseWriter, r *http.Request) {
 	cas, err := s.store.ListCAs()
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, "operation failed", err)
 		return
 	}
 	jsonResp(w, cas)
@@ -195,7 +201,7 @@ func (s *Server) handleGetCA(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCABundle(w http.ResponseWriter, r *http.Request) {
 	cas, err := s.store.ListCAs()
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, "operation failed", err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-pem-file")
@@ -242,7 +248,7 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 
 	loadedCA, err := ca.LoadCAFromPEM([]byte(caRec.CertificatePEM), []byte(keyPEM))
 	if err != nil {
-		jsonError(w, fmt.Sprintf("load CA: %s", err), http.StatusInternalServerError)
+		serverError(w, "load CA", err)
 		return
 	}
 
@@ -296,7 +302,7 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 		Status:               "active",
 	})
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, "operation failed", err)
 		return
 	}
 
@@ -329,7 +335,7 @@ func (s *Server) handleListCerts(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	certs, err := s.store.ListCertsFiltered(status)
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, "operation failed", err)
 		return
 	}
 	jsonResp(w, certs)
@@ -371,7 +377,7 @@ func (s *Server) handleListExpiring(w http.ResponseWriter, r *http.Request) {
 	}
 	certs, err := s.store.ListExpiring(days)
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, "operation failed", err)
 		return
 	}
 	jsonResp(w, certs)
@@ -456,7 +462,7 @@ func (s *Server) handleIssueFromCSR(w http.ResponseWriter, r *http.Request) {
 	}
 	loadedCA, err := ca.LoadCAFromPEM([]byte(caRec.CertificatePEM), []byte(keyPEM))
 	if err != nil {
-		jsonError(w, fmt.Sprintf("load CA: %s", err), http.StatusInternalServerError)
+		serverError(w, "load CA", err)
 		return
 	}
 
@@ -500,7 +506,7 @@ func (s *Server) handleIssueFromCSR(w http.ResponseWriter, r *http.Request) {
 		Status:               "active",
 	})
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, "operation failed", err)
 		return
 	}
 
@@ -563,7 +569,7 @@ func (s *Server) handleRenewCert(w http.ResponseWriter, r *http.Request) {
 	}
 	loadedCA, err := ca.LoadCAFromPEM([]byte(caRec.CertificatePEM), []byte(keyPEM))
 	if err != nil {
-		jsonError(w, fmt.Sprintf("load CA: %s", err), http.StatusInternalServerError)
+		serverError(w, "load CA", err)
 		return
 	}
 
@@ -585,7 +591,7 @@ func (s *Server) handleRenewCert(w http.ResponseWriter, r *http.Request) {
 
 	renewedCertPEM, renewedKeyPEM, err := loadedCA.IssueCert(issueOpts)
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, "operation failed", err)
 		return
 	}
 
@@ -608,7 +614,7 @@ func (s *Server) handleRenewCert(w http.ResponseWriter, r *http.Request) {
 		RenewedFromSerial:    orig.Serial,
 	})
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, "operation failed", err)
 		return
 	}
 
@@ -640,7 +646,7 @@ func (s *Server) handleCRLForCA(w http.ResponseWriter, r *http.Request) {
 	}
 	crlDER, err := s.generateCRL(id)
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, "operation failed", err)
 		return
 	}
 
@@ -664,7 +670,8 @@ func (s *Server) handlePublicCRL(w http.ResponseWriter, r *http.Request) {
 	}
 	crlDER, err := s.generateCRL(caID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("ERROR: generate CRL for CA %d: %v", caID, err)
+		http.Error(w, "CRL generation failed", http.StatusInternalServerError)
 		return
 	}
 
@@ -727,7 +734,7 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	}
 	events, err := s.store.ListAudit(limit)
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, "operation failed", err)
 		return
 	}
 	jsonResp(w, events)
@@ -736,7 +743,7 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleInventory(w http.ResponseWriter, r *http.Request) {
 	views, err := s.store.ListInventory()
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, "operation failed", err)
 		return
 	}
 	jsonResp(w, views)
@@ -745,7 +752,7 @@ func (s *Server) handleInventory(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	stats, err := s.store.GetStats()
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, "operation failed", err)
 		return
 	}
 	jsonResp(w, stats)
@@ -782,4 +789,11 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// serverError logs the real error internally and returns a generic message to the client.
+// Prevents information disclosure via error messages.
+func serverError(w http.ResponseWriter, context string, err error) {
+	log.Printf("ERROR: %s: %v", context, err)
+	jsonError(w, "internal server error", http.StatusInternalServerError)
 }

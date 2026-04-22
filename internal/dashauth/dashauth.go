@@ -226,9 +226,12 @@ func (d *DashAuth) handleStatus(w http.ResponseWriter, r *http.Request) {
 // --- Session management ---
 
 func (d *DashAuth) createSession(ip string) string {
-	tokenBytes := make([]byte, tokenBytes)
-	rand.Read(tokenBytes)
-	token := hex.EncodeToString(tokenBytes)
+	tokenBuf := make([]byte, tokenBytes)
+	if _, err := rand.Read(tokenBuf); err != nil {
+		// Entropy failure is unrecoverable for a security system
+		panic("crypto/rand.Read failed: " + err.Error())
+	}
+	token := hex.EncodeToString(tokenBuf)
 
 	now := time.Now()
 	d.sessions.Store(token, &Session{
