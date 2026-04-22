@@ -30,7 +30,9 @@ Or use Docker:
 
 ```bash
 # Dev mode (localhost only, no auth, for local testing)
-docker run -d -p 127.0.0.1:8300:8300 -v pki-data:/data ghcr.io/cyphera-labs/open-pki-server
+docker run -d -p 127.0.0.1:8300:8300 -v pki-data:/data \
+  ghcr.io/cyphera-labs/open-pki-server \
+  serve --dev --db /data/open-pki.db --addr :8300
 
 # Authenticated mode
 docker run -d -p 127.0.0.1:8300:8300 -v pki-data:/data \
