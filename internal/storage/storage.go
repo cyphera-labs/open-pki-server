@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -27,12 +28,22 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("enable foreign keys: %w", err)
 	}
+	if _, err := db.Exec("PRAGMA secure_delete=ON"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("enable secure_delete: %w", err)
+	}
 
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+
+	// Harden file permissions
+	os.Chmod(path, 0600)
+	os.Chmod(path+"-wal", 0600)
+	os.Chmod(path+"-shm", 0600)
+
 	return s, nil
 }
 
@@ -506,10 +517,12 @@ func (s *Store) ListRevoked(caID int64) ([]RevokedEntry, error) {
 // Private keys
 // ============================================================
 
-func (s *Store) InsertKey(ownerType string, ownerID int64, keyRef, encryptedPEM, algorithm string) error {
+// InsertKey stores a private key. NOTE: key_pem is stored as plaintext PEM in this alpha.
+// Envelope encryption is planned but not yet implemented.
+func (s *Store) InsertKey(ownerType string, ownerID int64, keyRef, keyPEM, algorithm string) error {
 	_, err := s.db.Exec(`
 		INSERT INTO private_keys (owner_type, owner_id, key_ref, key_pem, algorithm)
-		VALUES (?, ?, ?, ?, ?)`, ownerType, ownerID, keyRef, encryptedPEM, algorithm)
+		VALUES (?, ?, ?, ?, ?)`, ownerType, ownerID, keyRef, keyPEM, algorithm)
 	return err
 }
 

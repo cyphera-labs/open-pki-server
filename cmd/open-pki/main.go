@@ -542,28 +542,51 @@ func listCmd() *cobra.Command {
 
 func serveCmd() *cobra.Command {
 	var (
-		addr    string
-		dbPath  string
-		apiKey  string
-		baseURL string
-		devMode bool
-		tlsCert string
-		tlsKey  string
+		addr         string
+		dbPath       string
+		apiKey       string
+		baseURL      string
+		devMode      bool
+		tlsCert      string
+		tlsKey       string
+		insecureHTTP bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Start the PKI server with REST API and dashboard",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Auth enforcement
 			if !devMode && apiKey == "" {
 				log.Fatal("FATAL: --api-key is required unless --dev is explicitly set.\n" +
 					"  Use --api-key <key> for authenticated mode.\n" +
 					"  Use --dev for local development (no auth).")
 			}
+
+			// TLS enforcement
+			useTLS := tlsCert != "" && tlsKey != ""
+			if !devMode && !useTLS && !insecureHTTP {
+				log.Fatal("FATAL: TLS is required outside --dev.\n" +
+					"  Provide --tls-cert and --tls-key for TLS.\n" +
+					"  Or use --insecure-http for loopback-only evaluation.")
+			}
+			if !devMode && insecureHTTP && !isLoopbackAddr(addr) {
+				log.Fatal("FATAL: --insecure-http is only allowed when binding to loopback (127.0.0.1 or localhost).")
+			}
+
+			// Base URL enforcement
+			if !devMode && baseURL == "" {
+				log.Fatal("FATAL: --base-url is required outside --dev.\n" +
+					"  CRL/OCSP URLs in issued certificates need a real base URL.")
+			}
+
 			if devMode {
 				log.Println("========================================")
 				log.Println("  DEV MODE — NOT FOR PRODUCTION")
 				log.Println("========================================")
+				if baseURL == "" {
+					baseURL = "http://localhost:8300"
+				}
 			}
 
 			store, err := storage.Open(dbPath)
@@ -574,11 +597,7 @@ func serveCmd() *cobra.Command {
 
 			cfg := config.Default()
 			cfg.Server.APIKey = apiKey
-			if baseURL != "" {
-				cfg.Server.PublicBaseURL = baseURL
-			}
-
-			useTLS := tlsCert != "" && tlsKey != ""
+			cfg.Server.PublicBaseURL = baseURL
 
 			profiles := profile.Defaults()
 			srv := api.NewServer(store, profiles, cfg, useTLS)
@@ -596,9 +615,7 @@ func serveCmd() *cobra.Command {
 				log.Printf("  TLS:       enabled")
 				return http.ListenAndServeTLS(addr, tlsCert, tlsKey, srv.Handler())
 			}
-			if !devMode {
-				log.Println("  WARNING:   serving over plain HTTP — use --tls-cert and --tls-key for TLS")
-			}
+			log.Printf("  TLS:       disabled (HTTP)")
 			return http.ListenAndServe(addr, srv.Handler())
 		},
 	}
@@ -608,10 +625,19 @@ func serveCmd() *cobra.Command {
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "API key for authentication")
 	cmd.Flags().StringVar(&tlsCert, "tls-cert", "", "TLS certificate PEM file")
 	cmd.Flags().StringVar(&tlsKey, "tls-key", "", "TLS private key PEM file")
-	cmd.Flags().StringVar(&baseURL, "base-url", "http://localhost:8300", "Public base URL for CRL/OCSP URLs embedded in certificates")
-	cmd.Flags().BoolVar(&devMode, "dev", false, "Dev mode — explicitly acknowledge no-auth for development")
+	cmd.Flags().StringVar(&baseURL, "base-url", "", "Public base URL for CRL/OCSP URLs (required outside --dev)")
+	cmd.Flags().BoolVar(&devMode, "dev", false, "Dev mode — local development only, no auth, no TLS")
+	cmd.Flags().BoolVar(&insecureHTTP, "insecure-http", false, "Allow plain HTTP outside --dev (loopback only)")
 
 	return cmd
+}
+
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	return host == "127.0.0.1" || host == "::1" || host == "localhost" || host == ""
 }
 
 func availableProfiles(profiles map[string]*profile.Profile) string {

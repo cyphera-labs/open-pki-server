@@ -1,6 +1,6 @@
 # Cyphera Open PKI Server
 
-> **Alpha software. Development and evaluation use only.** This release is not audited and is not suitable for production CA infrastructure. CA private keys are currently stored unwrapped in SQLite. Set an API key and do not expose the default configuration to untrusted networks.
+> **Alpha software. For development and evaluation only.** This release is not externally audited and is not suitable for production CA infrastructure. CA private keys are currently stored unwrapped in SQLite. In normal mode, start the server with an API key, TLS certificates, and an explicit public base URL. Use `--dev` only on localhost for local development.
 
 Open-source certificate authority and PKI lifecycle server for developers. Create CAs, issue certificates, manage revocation, and run mTLS — without fighting OpenSSL or depending on heavyweight enterprise platforms.
 
@@ -63,11 +63,18 @@ open-pki inspect ./certs/localhost.pem
 # Verify it
 open-pki verify ./certs/localhost.pem --ca ./certs/ca.pem
 
-# Start the server with dashboard
-open-pki serve --db ./open-pki.db
+# Start the server in dev mode (localhost only)
+open-pki serve --dev --db ./open-pki.db --addr 127.0.0.1:8300
+
+# Start with TLS and authentication
+open-pki serve \
+  --api-key "$PKI_API_KEY" \
+  --tls-cert ./certs/pki.pem --tls-key ./certs/pki-key.pem \
+  --base-url https://localhost:8300 \
+  --db ./open-pki.db
 ```
 
-Dashboard at [http://localhost:8300](http://localhost:8300).
+Dashboard at http://localhost:8300 (dev mode) or https://localhost:8300 (TLS mode).
 
 ## KMIP mTLS in 4 commands
 
