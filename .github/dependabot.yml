@@ -1,10 +1,25 @@
+# Grouped: minor/patch bundle into one monthly PR per ecosystem; majors come individually for review.
 version: 2
 updates:
-  - package-ecosystem: "gomod"
-    directory: "/"
-    schedule:
-      interval: "monthly"
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "monthly"
+- package-ecosystem: gomod
+  directory: /
+  schedule:
+    interval: monthly
+  groups:
+    gomod-minor-patch:
+      patterns:
+      - '*'
+      update-types:
+      - minor
+      - patch
+- package-ecosystem: github-actions
+  directory: /
+  schedule:
+    interval: monthly
+  groups:
+    github-actions-minor-patch:
+      patterns:
+      - '*'
+      update-types:
+      - minor
+      - patch
